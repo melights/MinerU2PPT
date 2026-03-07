@@ -4,8 +4,8 @@ from converter.adapters.ocr_adapter import OCRAdapter
 
 
 class _FakeEngine:
-    def extract_text_elements(self, _page_image, _json_w, _json_h):
-        return [
+    def extract_text_elements(self, _page_image, _json_w, _json_h, return_stage_elements=False):
+        elements = [
             {
                 "type": "text",
                 "bbox": [20, 30, 120, 60],
@@ -21,6 +21,12 @@ class _FakeEngine:
                 ],
             }
         ]
+        if return_stage_elements:
+            return {
+                "before_refined_elements": elements,
+                "after_refined_elements": elements,
+            }
+        return elements
 
 
 class TestOCRAdapter(unittest.TestCase):

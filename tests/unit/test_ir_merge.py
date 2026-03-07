@@ -70,6 +70,81 @@ class TestIRMerge(unittest.TestCase):
         self.assertEqual(merged[0]["text"], "new")
         self.assertEqual(stats["overlap_replaced"], 1)
 
+    def test_overlap_replacement_inherits_bold_from_base(self):
+        base = [
+            {
+                "type": "text",
+                "bbox": [10, 10, 40, 30],
+                "text": "old",
+                "text_runs": [
+                    {"text": "old", "bbox": [10, 10, 40, 30], "line_index": 0, "style": {"bold": True}}
+                ],
+                "group_id": None,
+                "order": [10, 10],
+                "style": {"bold": True, "font_size": None, "align": "left"},
+                "is_discarded": False,
+                "source": "mineru",
+            }
+        ]
+        overlay = [
+            {
+                "type": "text",
+                "bbox": [20, 20, 50, 35],
+                "text": "new",
+                "text_runs": [
+                    {"text": "new", "bbox": [20, 20, 50, 35], "line_index": 0, "style": {"bold": False}}
+                ],
+                "group_id": None,
+                "order": [20, 20],
+                "style": {"bold": False, "font_size": None, "align": "left"},
+                "is_discarded": False,
+                "source": "ocr",
+            }
+        ]
+
+        merged, _ = merge_ir_elements(base, overlay)
+        self.assertEqual(len(merged), 1)
+        self.assertTrue(merged[0]["style"]["bold"])
+        self.assertTrue(merged[0]["text_runs"][0]["style"]["bold"])
+
+    def test_group_replacement_inherits_bold_from_base(self):
+        base = [
+            {
+                "type": "text",
+                "bbox": [10, 10, 40, 30],
+                "text": "mineru",
+                "text_runs": [
+                    {"text": "mineru", "bbox": [10, 10, 40, 30], "line_index": 0, "style": {"bold": True}}
+                ],
+                "group_id": "g1",
+                "order": [10, 10],
+                "style": {"bold": True, "font_size": None, "align": "left"},
+                "is_discarded": False,
+                "source": "mineru",
+            }
+        ]
+        overlay = [
+            {
+                "type": "text",
+                "bbox": [10, 10, 41, 31],
+                "text": "ocr",
+                "text_runs": [
+                    {"text": "ocr", "bbox": [10, 10, 41, 31], "line_index": 0, "style": {"bold": False}}
+                ],
+                "group_id": "g1",
+                "order": [10, 10],
+                "style": {"bold": False, "font_size": None, "align": "left"},
+                "is_discarded": False,
+                "source": "ocr",
+            }
+        ]
+
+        merged, _ = merge_ir_elements(base, overlay)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["text"], "ocr")
+        self.assertTrue(merged[0]["style"]["bold"])
+        self.assertTrue(merged[0]["text_runs"][0]["style"]["bold"])
+
     def test_non_overlapping_overlay_is_appended(self):
         base = [
             {

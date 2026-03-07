@@ -49,6 +49,7 @@ TRANSLATIONS = {
         "log_task_start": "Starting task {} of {}: {}",
         "log_task_complete": "Finished task: {}\n",
         "add_task_title": "Add New Task",
+        "page_range_label": "PDF Page Range (optional):",
         "ok_button": "OK",
         "cancel_button": "Cancel",
     },
@@ -89,6 +90,7 @@ TRANSLATIONS = {
         "log_task_start": "开始任务 {} of {}: {}",
         "log_task_complete": "完成任务: {}\n",
         "add_task_title": "添加新任务",
+        "page_range_label": "PDF 页码范围（可选）:",
         "ok_button": "确定",
         "cancel_button": "取消",
     }
@@ -115,6 +117,7 @@ class AddTaskDialog(tk.Toplevel):
         self.input_path = tk.StringVar()
         self.json_path = tk.StringVar()
         self.output_path = tk.StringVar()
+        self.page_range = tk.StringVar()
         self.remove_watermark = tk.BooleanVar(value=True)
         self.result = None
 
@@ -146,12 +149,15 @@ class AddTaskDialog(tk.Toplevel):
         tk.Entry(frame, textvariable=self.output_path).grid(row=2, column=1, sticky="ew", padx=5)
         tk.Button(frame, text=self.i18n['save_as_button'], command=self._save_pptx).grid(row=2, column=2, padx=5)
 
+        tk.Label(frame, text=self.i18n['page_range_label']).grid(row=3, column=0, sticky="w", pady=5)
+        tk.Entry(frame, textvariable=self.page_range).grid(row=3, column=1, sticky="ew", padx=5)
+
         options_frame = tk.Frame(frame)
-        options_frame.grid(row=3, column=0, columnspan=3, pady=10, sticky="w")
+        options_frame.grid(row=4, column=0, columnspan=3, pady=10, sticky="w")
         tk.Checkbutton(options_frame, text=self.i18n['remove_watermark_checkbox'], variable=self.remove_watermark).pack(side=tk.LEFT)
 
         buttons_frame = tk.Frame(frame)
-        buttons_frame.grid(row=4, column=0, columnspan=3, pady=5)
+        buttons_frame.grid(row=5, column=0, columnspan=3, pady=5)
         tk.Button(buttons_frame, text=self.i18n['ok_button'], command=self._on_ok, width=10).pack(side=tk.LEFT, padx=10)
         tk.Button(buttons_frame, text=self.i18n['cancel_button'], command=self.destroy, width=10).pack(side=tk.LEFT, padx=10)
 
@@ -187,6 +193,7 @@ class AddTaskDialog(tk.Toplevel):
             "input": input_f,
             "json": json_f,
             "output": output_f,
+            "page_range": self.page_range.get().strip() or None,
             "remove_watermark": self.remove_watermark.get(),
         }
         self.destroy()
@@ -199,6 +206,7 @@ class App(TkinterDnD.Tk):
         self.geometry("700x600")
         self.debug_folder_path = os.path.join(os.getcwd(), "tmp")
         self.input_path, self.json_path, self.output_path = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        self.page_range = tk.StringVar()
         self.remove_watermark, self.generate_debug = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
         self.batch_mode = tk.BooleanVar(value=False)
         self.task_list = []
@@ -240,6 +248,9 @@ class App(TkinterDnD.Tk):
         tk.Label(self.single_mode_frame, text=self.i18n['output_file_label']).grid(row=2, column=0, sticky="w", pady=2)
         tk.Entry(self.single_mode_frame, textvariable=self.output_path).grid(row=2, column=1, sticky="ew", padx=5)
         tk.Button(self.single_mode_frame, text=self.i18n['save_as_button'], command=self._save_pptx).grid(row=2, column=2, sticky="w")
+
+        tk.Label(self.single_mode_frame, text=self.i18n['page_range_label']).grid(row=3, column=0, sticky="w", pady=2)
+        tk.Entry(self.single_mode_frame, textvariable=self.page_range).grid(row=3, column=1, sticky="ew", padx=5)
 
         # --- Batch Mode Frame ---
         self.batch_frame = tk.Frame(self.main_frame)
@@ -414,7 +425,13 @@ class App(TkinterDnD.Tk):
     def _run_single_conversion(self, json_path, input_path, output_path):
         if self.shared_ocr_engine is None:
             from converter.ocr_merge import PaddleOCREngine
-            self.shared_ocr_engine = PaddleOCREngine(device_policy="auto", offline_only=True)
+            self.shared_ocr_engine = PaddleOCREngine(
+                device_policy="auto",
+                offline_only=True,
+                det_db_thresh=0.35,
+                det_db_box_thresh=0.80,
+                det_db_unclip_ratio=1.00,
+            )
 
         args = (
             json_path,
@@ -423,7 +440,7 @@ class App(TkinterDnD.Tk):
             self.remove_watermark.get(),
             self.generate_debug.get(),
         )
-        convert_mineru_to_ppt(*args, ocr_engine=self.shared_ocr_engine)
+        convert_mineru_to_ppt(*args, ocr_engine=self.shared_ocr_engine, page_range=self.page_range.get().strip() or None)
         self.log_queue.put(self.i18n['log_success'])
 
     def _run_batch_conversion(self):
@@ -442,9 +459,19 @@ class App(TkinterDnD.Tk):
                 )
                 if self.shared_ocr_engine is None:
                     from converter.ocr_merge import PaddleOCREngine
-                    self.shared_ocr_engine = PaddleOCREngine(device_policy="auto", offline_only=True)
+                    self.shared_ocr_engine = PaddleOCREngine(
+                        device_policy="auto",
+                        offline_only=True,
+                        det_db_thresh=0.35,
+                        det_db_box_thresh=0.80,
+                        det_db_unclip_ratio=1.00,
+                    )
 
-                convert_mineru_to_ppt(*args, ocr_engine=self.shared_ocr_engine)
+                convert_mineru_to_ppt(
+                    *args,
+                    ocr_engine=self.shared_ocr_engine,
+                    page_range=(task.get('page_range') or None),
+                )
                 self.log_queue.put(self.i18n['log_task_complete'].format(os.path.basename(task['input'])))
             except Exception as e:
                 self.log_queue.put(self.i18n['log_error'].format(e))

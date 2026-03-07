@@ -20,8 +20,8 @@ TEXT_ELEMENT_TYPES = (
     "page_number",
 )
 
-OCR_BBOX_PAD_RATIO = 0.10
-OCR_BBOX_MIN_PAD_PIXELS = 2
+OCR_BBOX_PAD_RATIO = 0.05
+OCR_BBOX_MIN_PAD_PIXELS = 1
 ROW_FONT_DISTANCE_THRESHOLD = 60.0
 ROW_FONT_MIN_PIXEL_RATIO = 0.005
 ROW_NON_BG_DISTANCE_THRESHOLD = 55.0
@@ -40,12 +40,18 @@ class PaddleOCREngine:
         device_policy: str = "auto",
         model_root: str | None = None,
         offline_only: bool = True,
+        det_db_thresh: float | None = None,
+        det_db_box_thresh: float | None = None,
+        det_db_unclip_ratio: float | None = None,
     ):
         self.lang = lang
         self.use_angle_cls = use_angle_cls
         self.device_policy = device_policy
         self.model_root = model_root
         self.offline_only = offline_only
+        self.det_db_thresh = det_db_thresh
+        self.det_db_box_thresh = det_db_box_thresh
+        self.det_db_unclip_ratio = det_db_unclip_ratio
         self._ocr = None
 
         if self.device_policy not in {"auto", "gpu", "cpu"}:
@@ -150,6 +156,30 @@ class PaddleOCREngine:
             **model_dirs,
         }
 
+        det_param_variants = [{}]
+        if (
+            self.det_db_thresh is not None
+            or self.det_db_box_thresh is not None
+            or self.det_db_unclip_ratio is not None
+        ):
+            legacy_params = {}
+            text_det_params = {}
+
+            if self.det_db_thresh is not None:
+                legacy_params["det_db_thresh"] = float(self.det_db_thresh)
+                text_det_params["text_det_thresh"] = float(self.det_db_thresh)
+
+            if self.det_db_box_thresh is not None:
+                legacy_params["det_db_box_thresh"] = float(self.det_db_box_thresh)
+                text_det_params["text_det_box_thresh"] = float(self.det_db_box_thresh)
+
+            if self.det_db_unclip_ratio is not None:
+                legacy_params["det_db_unclip_ratio"] = float(self.det_db_unclip_ratio)
+                text_det_params["text_det_unclip_ratio"] = float(self.det_db_unclip_ratio)
+
+            # Try modern text_det_* names first, then legacy det_db_* for older versions.
+            det_param_variants = [text_det_params, legacy_params]
+
         if self.offline_only:
             base_kwargs["download"] = False
 
@@ -177,16 +207,18 @@ class PaddleOCREngine:
 
         device_variants = [{"device": device}]
 
-        for device_kwargs in device_variants:
-            for attempt in compatibility_attempts:
-                yield {**base_kwargs, **device_kwargs, **attempt}
+        for det_params in det_param_variants:
+            for device_kwargs in device_variants:
+                for attempt in compatibility_attempts:
+                    yield {**base_kwargs, **det_params, **device_kwargs, **attempt}
 
         if self.offline_only and "download" in base_kwargs:
             fallback_base = dict(base_kwargs)
             fallback_base.pop("download", None)
-            for device_kwargs in device_variants:
-                for attempt in compatibility_attempts:
-                    yield {**fallback_base, **device_kwargs, **attempt}
+            for det_params in det_param_variants:
+                for device_kwargs in device_variants:
+                    for attempt in compatibility_attempts:
+                        yield {**fallback_base, **det_params, **device_kwargs, **attempt}
 
     def _ensure_initialized(self):
         if self._ocr is not None:
@@ -255,14 +287,24 @@ class PaddleOCREngine:
                 return self._ocr.ocr(bgr_image)
             raise
 
-    def extract_text_elements(self, page_image, json_w: float, json_h: float):
+    def extract_text_elements(self, page_image, json_w: float, json_h: float, return_stage_elements: bool = False):
         self._ensure_initialized()
 
         if page_image is None or page_image.size == 0:
+            if return_stage_elements:
+                return {
+                    "before_refined_elements": [],
+                    "after_refined_elements": [],
+                }
             return []
 
         img_h, img_w = page_image.shape[:2]
         if img_h == 0 or img_w == 0:
+            if return_stage_elements:
+                return {
+                    "before_refined_elements": [],
+                    "after_refined_elements": [],
+                }
             return []
 
         raw_result = self._run_ocr(page_image)
@@ -306,6 +348,12 @@ class PaddleOCREngine:
 
         for idx, elem in enumerate(refined_elements, start=1):
             elem["index"] = idx
+
+        if return_stage_elements:
+            return {
+                "before_refined_elements": merged_line_elements,
+                "after_refined_elements": refined_elements,
+            }
 
         return refined_elements
 

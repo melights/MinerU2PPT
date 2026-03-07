@@ -1,10 +1,12 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 from PIL import Image
+from pptx import Presentation
 
 from converter.generator import PPTGenerator, convert_mineru_to_ppt
 from converter.ir_merge import merge_ir_elements
@@ -15,10 +17,10 @@ class FakeOCREngine:
     def __init__(self, should_fail=False):
         self.should_fail = should_fail
 
-    def extract_text_elements(self, page_image, json_w, json_h):
+    def extract_text_elements(self, page_image, json_w, json_h, return_stage_elements=False):
         if self.should_fail:
             raise RuntimeError("ocr init failed")
-        return [
+        elements = [
             {
                 "type": "text",
                 "bbox": [60, 60, 100, 100],
@@ -32,6 +34,12 @@ class FakeOCREngine:
                 "is_discarded": False,
             }
         ]
+        if return_stage_elements:
+            return {
+                "before_refined_elements": elements,
+                "after_refined_elements": elements,
+            }
+        return elements
 
 
 class TestGeneratorOCRMerge(unittest.TestCase):
@@ -77,11 +85,158 @@ class TestGeneratorOCRMerge(unittest.TestCase):
                     ocr_engine=FakeOCREngine(should_fail=True),
                 )
 
+    def test_convert_applies_pdf_page_range(self):
+        fake_json_data = [
+            {
+                "para_blocks": [{"type": "text", "bbox": [10, 10, 90, 40], "text": "p1"}],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            },
+            {
+                "para_blocks": [{"type": "text", "bbox": [10, 10, 90, 40], "text": "p2"}],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            },
+            {
+                "para_blocks": [{"type": "text", "bbox": [10, 10, 90, 40], "text": "p3"}],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            },
+        ]
+
+        class _Engine:
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
+                return []
+
+        fake_images = [np.zeros((600, 600, 3), dtype=np.uint8) for _ in range(3)]
+
+        with (
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch("converter.utils.pdf_to_images", return_value=fake_images),
+            mock.patch.object(PPTGenerator, "save", return_value=None),
+        ):
+            gen = convert_mineru_to_ppt(
+                "in.json",
+                "in.pdf",
+                "out.pptx",
+                ocr_engine=_Engine(),
+                page_range="1,3",
+            )
+
+            self.assertIsNone(gen)
+
+        with (
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch("converter.utils.pdf_to_images", return_value=fake_images),
+            mock.patch.object(PPTGenerator, "save", return_value=None),
+        ):
+            generator = PPTGenerator("out.pptx", ocr_engine=_Engine())
+            with mock.patch("converter.generator.PPTGenerator", return_value=generator):
+                convert_mineru_to_ppt(
+                    "in.json",
+                    "in.pdf",
+                    "out.pptx",
+                    ocr_engine=_Engine(),
+                    page_range="1,3",
+                )
+                self.assertEqual(len(generator.prs.slides), 2)
+
+    def test_convert_rejects_invalid_pdf_page_range(self):
+        fake_json_data = [
+            {
+                "para_blocks": [{"type": "text", "bbox": [10, 10, 90, 40], "text": "p1"}],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            }
+        ]
+
+        class _Engine:
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
+                return []
+
+        with (
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch("converter.utils.pdf_to_images", return_value=[np.zeros((600, 600, 3), dtype=np.uint8)]),
+            mock.patch.object(PPTGenerator, "save", return_value=None),
+        ):
+            with self.assertRaises(ValueError):
+                convert_mineru_to_ppt(
+                    "in.json",
+                    "in.pdf",
+                    "out.pptx",
+                    ocr_engine=_Engine(),
+                    page_range="2",
+                )
+
+    def test_convert_ignores_page_range_for_non_pdf(self):
+        fake_json_data = [
+            {
+                "para_blocks": [{"type": "text", "bbox": [10, 10, 90, 40], "text": "img"}],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            }
+        ]
+
+        class _Engine:
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
+                return []
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch.object(PPTGenerator, "save", return_value=None),
+        ):
+            input_png = Path(td) / "in.png"
+            output_ppt = Path(td) / "out.pptx"
+            Image.fromarray(np.zeros((600, 600, 3), dtype=np.uint8)).save(input_png)
+
+            convert_mineru_to_ppt(
+                "in.json",
+                str(input_png),
+                str(output_ppt),
+                ocr_engine=_Engine(),
+                page_range="999",
+            )
+
     def test_convert_constructs_ocr_engine_with_forwarded_config(self):
         fake_json_data = [{"para_blocks": [], "images": [], "tables": [], "discarded_blocks": []}]
 
         class _Engine:
-            def extract_text_elements(self, *_args, **_kwargs):
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
                 return []
 
         with (
@@ -113,13 +268,67 @@ class TestGeneratorOCRMerge(unittest.TestCase):
             device_policy="cpu",
             model_root="models/paddleocr",
             offline_only=True,
+            det_db_thresh=None,
+            det_db_box_thresh=None,
+            det_db_unclip_ratio=None,
+        )
+
+    def test_convert_forwards_tuned_ocr_detection_options_to_engine(self):
+        fake_json_data = [{"para_blocks": [], "images": [], "tables": [], "discarded_blocks": []}]
+
+        class _Engine:
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
+                return []
+
+        with (
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch("converter.generator.Image.open") as mocked_image_open,
+            mock.patch("converter.generator.np.array", return_value=np.zeros((600, 600, 3), dtype=np.uint8)),
+            mock.patch("converter.generator.PaddleOCREngine", return_value=_Engine()) as mocked_engine,
+            mock.patch("converter.generator.PPTGenerator") as mocked_generator_cls,
+        ):
+            rgb_image = mock.Mock()
+            rgb_image.mode = "RGB"
+            rgb_image.convert.return_value = rgb_image
+            mocked_image_open.return_value = rgb_image
+
+            generator_instance = mocked_generator_cls.return_value
+            generator_instance.add_slide.return_value = object()
+
+            convert_mineru_to_ppt(
+                "in.json",
+                "in.png",
+                "out.pptx",
+                ocr_det_db_thresh=0.35,
+                ocr_det_db_box_thresh=0.8,
+                ocr_det_db_unclip_ratio=1.1,
+            )
+
+        mocked_engine.assert_called_once_with(
+            device_policy="auto",
+            model_root=None,
+            offline_only=True,
+            det_db_thresh=0.35,
+            det_db_box_thresh=0.8,
+            det_db_unclip_ratio=1.1,
         )
 
     def test_convert_function_forwards_ocr_config_to_generator(self):
         fake_json_data = [{"para_blocks": [], "images": [], "tables": [], "discarded_blocks": []}]
 
         class _Engine:
-            def extract_text_elements(self, *_args, **_kwargs):
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
                 return []
 
         with (
@@ -155,6 +364,168 @@ class TestGeneratorOCRMerge(unittest.TestCase):
         self.assertEqual(kwargs["ocr_offline_only"], True)
         self.assertIsNotNone(kwargs["ocr_engine"])
 
+
+    def test_convert_outputs_stage_debug_images_and_original_png(self):
+        fake_json_data = [
+            {
+                "para_blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [10, 10, 90, 40],
+                        "text": "mineru-text",
+                    }
+                ],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            }
+        ]
+
+        fake_ocr_output = [
+            {
+                "type": "text",
+                "bbox": [10, 10, 90, 40],
+                "index": 1,
+                "lines": [
+                    {
+                        "bbox": [10, 10, 90, 40],
+                        "spans": [
+                            {
+                                "bbox": [10, 10, 90, 40],
+                                "content": "ocr-text",
+                                "type": "text",
+                            }
+                        ],
+                    }
+                ],
+                "is_discarded": False,
+            }
+        ]
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+            mock.patch("converter.generator.os.path.exists", return_value=False),
+            mock.patch("converter.generator.os.makedirs", return_value=None),
+            mock.patch("converter.generator.shutil.rmtree", return_value=None),
+            mock.patch("converter.generator.cv2.imwrite", return_value=True) as mocked_imwrite,
+            mock.patch("converter.generator.PageContext.render_to_slide", return_value=None),
+        ):
+            output_ppt = Path(td) / "out.pptx"
+            input_png = Path(td) / "in.png"
+            Image.fromarray(np.zeros((600, 600, 3), dtype=np.uint8)).save(input_png)
+
+            class _Engine:
+                def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                    if return_stage_elements:
+                        return {
+                            "before_refined_elements": fake_ocr_output,
+                            "after_refined_elements": fake_ocr_output,
+                        }
+                    return fake_ocr_output
+
+            convert_mineru_to_ppt(
+                "in.json",
+                str(input_png),
+                str(output_ppt),
+                ocr_engine=_Engine(),
+                debug_images=True,
+            )
+
+            written_paths = [
+                str(call.args[0]).replace("\\", "/")
+                for call in mocked_imwrite.call_args_list
+                if call.args
+            ]
+            self.assertTrue(any(path.endswith("tmp/page_0_original.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("tmp/page_0_mineru_original_boxes.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("tmp/page_0_ocr_before_refined_elements.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("tmp/page_0_ocr_after_refined_elements.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("tmp/page_0_merged_final_boxes.png") for path in written_paths))
+
+    def test_convert_inherits_mineru_bold_when_ocr_replaces_text(self):
+        fake_json_data = [
+            {
+                "para_blocks": [
+                    {
+                        "type": "title",
+                        "bbox": [10, 10, 90, 40],
+                        "text": "mineru-title",
+                    }
+                ],
+                "images": [],
+                "tables": [],
+                "discarded_blocks": [],
+                "page_size": [600, 600],
+            }
+        ]
+
+        fake_ocr_output = [
+            {
+                "type": "text",
+                "bbox": [10, 10, 90, 40],
+                "index": 1,
+                "lines": [
+                    {
+                        "bbox": [10, 10, 90, 40],
+                        "spans": [
+                            {
+                                "bbox": [10, 10, 90, 40],
+                                "content": "ocr-title",
+                                "type": "text",
+                            }
+                        ],
+                    }
+                ],
+                "is_discarded": False,
+            }
+        ]
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch("converter.generator.open", mock.mock_open(read_data="[]")),
+            mock.patch("converter.generator.json.load", return_value=fake_json_data),
+        ):
+            output_ppt = Path(td) / "out.pptx"
+            input_png = Path(td) / "in.png"
+            Image.fromarray(np.zeros((600, 600, 3), dtype=np.uint8)).save(input_png)
+
+            class _Engine:
+                def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                    if return_stage_elements:
+                        return {
+                            "before_refined_elements": fake_ocr_output,
+                            "after_refined_elements": fake_ocr_output,
+                        }
+                    return fake_ocr_output
+
+            convert_mineru_to_ppt(
+                "in.json",
+                str(input_png),
+                str(output_ppt),
+                ocr_engine=_Engine(),
+            )
+
+            prs = Presentation(str(output_ppt))
+            slide = prs.slides[0]
+
+            text_runs = []
+            for shape in slide.shapes:
+                if not hasattr(shape, "text_frame"):
+                    continue
+                tf = shape.text_frame
+                if tf is None:
+                    continue
+                for para in tf.paragraphs:
+                    text_runs.extend(para.runs)
+
+            self.assertTrue(any(run.text == "ocr-title" for run in text_runs))
+            self.assertTrue(
+                any(run.text == "ocr-title" and run.font.bold for run in text_runs),
+                "Expected OCR-replaced text to inherit MinerU bold in rendered PPT",
+            )
 
     def test_case2_ir_merge_outputs_text_elements(self):
         repo_root = Path(__file__).resolve().parents[2]

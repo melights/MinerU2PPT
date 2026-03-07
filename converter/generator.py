@@ -11,31 +11,28 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Pt
 
 from .adapters import MinerUAdapter, MinerUPageData, OCRAdapter
-from .ir import materialize_text_runs_for_elements, validate_ir_elements
+from .ir import build_page_ir, materialize_text_runs_for_elements, validate_ir_elements
 from .ir_merge import merge_ir_elements
 from .ocr_merge import PaddleOCREngine
 from .utils import extract_background_color, extract_font_color, fill_bbox_with_bg
 
 
 class PageContext:
-    def __init__(self, page_image, coords, slide):
+    def __init__(self, page_index, page_image, coords, slide):
+        self.page_index = int(page_index)
         self.slide = slide
         self.original_image = page_image.copy()
         self.background_image = page_image.copy()
         self.coords = coords
         self.elements = []
+        self.stage_page_irs = {}
 
-    def add_element_bbox_for_cleanup(self, bbox, margin_px=0, margin_ratio=0.0, min_margin_px=1):
+    def add_element_bbox_for_cleanup(self, bbox, margin_px=0):
         """Register a bounding box to be inpainted on the background image."""
         if bbox:
             px_box = [int(v * (self.coords['img_w'] / self.coords['json_w'] if i % 2 == 0 else self.coords['img_h'] / self.coords['json_h'])) for i, v in enumerate(bbox)]
-            x1, y1, x2, y2 = px_box
-
-            if margin_ratio > 0:
-                height = max(1, y2 - y1)
-                margin = max(min_margin_px, int(round(height * margin_ratio)))
-                px_box = [x1 - margin, y1 - margin, x2 + margin, y2 + margin]
-            elif margin_px > 0:
+            if margin_px > 0:
+                x1, y1, x2, y2 = px_box
                 px_box = [x1 - margin_px, y1 - margin_px, x2 + margin_px, y2 + margin_px]
 
             fill_bbox_with_bg(self.background_image, px_box)
@@ -44,8 +41,41 @@ class PageContext:
         """Store a fully processed element ready for rendering."""
         self.elements.append({'type': elem_type, 'data': data})
 
-    def generate_debug_images(self, page_index, generator_instance):
+    def register_stage_page_ir(self, stage, page_ir):
+        self.stage_page_irs[str(stage)] = page_ir
+
+    def _extract_stage_text_bboxes(self, stage):
+        page_ir = self.stage_page_irs.get(stage)
+        if page_ir is None:
+            return []
+        return [
+            elem.get('bbox')
+            for elem in page_ir.elements
+            if elem.get('type') == 'text' and elem.get('bbox')
+        ]
+
+    def generate_debug_images(self, generator_instance):
         """Generate and save debug images for the page."""
+        page_index = self.page_index
+
+        cv2.imwrite(f"tmp/page_{page_index}_original.png", cv2.cvtColor(self.original_image, cv2.COLOR_RGB2BGR))
+
+        stage_outputs = [
+            ("mineru_original", f"tmp/page_{page_index}_mineru_original_boxes.png"),
+            ("ocr_before_refined_elements", f"tmp/page_{page_index}_ocr_before_refined_elements.png"),
+            ("ocr_after_refined_elements", f"tmp/page_{page_index}_ocr_after_refined_elements.png"),
+            ("merged_final", f"tmp/page_{page_index}_merged_final_boxes.png"),
+        ]
+
+        for stage_name, output_path in stage_outputs:
+            stage_bboxes = self._extract_stage_text_bboxes(stage_name)
+            generator_instance._draw_text_bboxes_for_page(
+                self.original_image,
+                stage_bboxes,
+                self.coords,
+                output_path,
+            )
+
         text_bboxes = [
             elem['data']['bbox']
             for elem in self.elements
@@ -78,7 +108,7 @@ class PageContext:
                 generator_instance._render_text_from_data(self.slide, elem['data'])
 
 
-TEXT_CLEANUP_MARGIN_RATIO = 0.05
+TEXT_CLEANUP_MARGIN_RATIO = 0.25
 TEXT_CLEANUP_MIN_MARGIN_PX = 1
 
 
@@ -260,7 +290,6 @@ class PPTGenerator:
         context.add_element_bbox_for_cleanup(
             bbox,
             margin_px=cleanup_margin_px,
-            min_margin_px=TEXT_CLEANUP_MIN_MARGIN_PX,
         )
 
         ir_runs = elem.get("text_runs")
@@ -366,7 +395,7 @@ class PPTGenerator:
         elif cat == "image":
             self._process_image(context, elem, all_text_elements)
 
-    def process_page(self, slide, elements, page_image, page_size=None, page_index=0, debug_images=False):
+    def process_page(self, slide, elements, page_image, page_size=None, page_index=0, debug_images=False, context=None):
         self.debug_images = debug_images
         elements = validate_ir_elements(elements)
         elements = materialize_text_runs_for_elements(elements)
@@ -380,7 +409,12 @@ class PPTGenerator:
                   'json_w': json_w, 'json_h': json_h}
         self.coords_for_render = coords
 
-        context = PageContext(page_image, coords, slide)
+        if context is None:
+            context = PageContext(page_index, page_image, coords, slide)
+        else:
+            context.slide = slide
+            context.coords = coords
+            context.page_index = int(page_index)
 
         all_text_elements = [e for e in elements if e.get("type") == "text"]
 
@@ -397,10 +431,54 @@ class PPTGenerator:
         context.render_to_slide(self)
 
         if self.debug_images:
-            context.generate_debug_images(page_index, self)
+            context.generate_debug_images(self)
 
     def save(self):
         self.prs.save(self.output_path)
+
+
+def _parse_pdf_page_range(page_range: str, total_pages: int) -> list[int]:
+    if total_pages <= 0:
+        raise ValueError("PDF has no pages to process")
+
+    expr = str(page_range or "").strip()
+    if not expr:
+        raise ValueError("Page range is empty. Example: 1,3,5-8")
+
+    selected: set[int] = set()
+
+    for raw_token in expr.split(","):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError(f"Invalid page range token: '{raw_token}'. Example: 1,3,5-8")
+
+        if "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+                raise ValueError(f"Invalid page range token: '{token}'. Example: 1,3,5-8")
+
+            start = int(parts[0].strip())
+            end = int(parts[1].strip())
+            if start < 1 or end < 1:
+                raise ValueError(f"Page number must be >= 1, got '{token}'")
+            if end < start:
+                raise ValueError(f"Invalid page range '{token}': end < start")
+            if end > total_pages:
+                raise ValueError(f"Page number out of range in '{token}': total pages = {total_pages}")
+
+            for page_no in range(start, end + 1):
+                selected.add(page_no - 1)
+        else:
+            if not token.isdigit():
+                raise ValueError(f"Invalid page number: '{token}'. Example: 1,3,5-8")
+            page_no = int(token)
+            if page_no < 1:
+                raise ValueError(f"Page number must be >= 1, got '{token}'")
+            if page_no > total_pages:
+                raise ValueError(f"Page number out of range: '{token}', total pages = {total_pages}")
+            selected.add(page_no - 1)
+
+    return sorted(selected)
 
 
 def convert_mineru_to_ppt(
@@ -413,6 +491,10 @@ def convert_mineru_to_ppt(
     ocr_device_policy="auto",
     ocr_model_root=None,
     ocr_offline_only=True,
+    ocr_det_db_thresh=None,
+    ocr_det_db_box_thresh=None,
+    ocr_det_db_unclip_ratio=None,
+    page_range=None,
 ):
     from .utils import pdf_to_images
     DPI = 300
@@ -425,7 +507,8 @@ def convert_mineru_to_ppt(
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    if input_path.lower().endswith('.pdf'):
+    is_pdf_input = input_path.lower().endswith('.pdf')
+    if is_pdf_input:
         images = pdf_to_images(input_path, dpi=DPI)
     else:
         try:
@@ -441,6 +524,9 @@ def convert_mineru_to_ppt(
             device_policy=ocr_device_policy,
             model_root=ocr_model_root,
             offline_only=ocr_offline_only,
+            det_db_thresh=ocr_det_db_thresh,
+            det_db_box_thresh=ocr_det_db_box_thresh,
+            det_db_unclip_ratio=ocr_det_db_unclip_ratio,
         )
 
     mineru_adapter = MinerUAdapter()
@@ -458,13 +544,26 @@ def convert_mineru_to_ppt(
         (data[k] for k in ["pdf_info", "pages"] if k in data and isinstance(data[k], list)), [data]
     )
     print(f"[CLEANUP] Found {len(pages)} pages.")
-    for i, page_data in enumerate(pages):
-        if i >= len(images):
+
+    selected_page_indices = list(range(len(pages)))
+    if is_pdf_input and page_range is not None and str(page_range).strip() != "":
+        selected_page_indices = _parse_pdf_page_range(str(page_range), len(pages))
+
+    first_processed = True
+    total_selected = len(selected_page_indices)
+
+    for selected_pos, page_index in enumerate(selected_page_indices):
+        if page_index >= len(images):
             break
-        print(f"Processing page {i + 1}/{len(pages)}...")
-        page_img = images[i].copy()
-        if i == 0:
+
+        page_data = pages[page_index]
+        print(f"Processing page {page_index + 1}/{len(pages)} (selected {selected_pos + 1}/{total_selected})...")
+        page_img = images[page_index].copy()
+
+        if first_processed:
             gen.set_slide_size(page_img.shape[1], page_img.shape[0], dpi=DPI)
+            first_processed = False
+
         slide = gen.add_slide()
 
         page_size = page_data.get("page_size") or (
@@ -472,24 +571,51 @@ def convert_mineru_to_ppt(
             page_data.get("page_info", {}).get("height"),
         )
         json_w, json_h = page_size if page_size and all(page_size) else (page_img.shape[1], page_img.shape[0])
+        coords = {
+            'scale_x': 1.0,
+            'scale_y': 1.0,
+            'img_w': page_img.shape[1],
+            'img_h': page_img.shape[0],
+            'json_w': json_w,
+            'json_h': json_h,
+        }
+        page_context = PageContext(page_index, page_img, coords, slide)
 
         mineru_page = MinerUPageData.from_dict(page_data)
         mineru_elements = validate_ir_elements(mineru_adapter.extract_page_elements(mineru_page, include_text_runs=False))
+        page_context.register_stage_page_ir(
+            "mineru_original",
+            build_page_ir(page_index=page_index, page_size=(float(json_w), float(json_h)), elements=mineru_elements),
+        )
 
         try:
-            ocr_elements = validate_ir_elements(ocr_adapter.extract_page_elements(page_img, json_w, json_h))
+            ocr_elements = validate_ir_elements(
+                ocr_adapter.extract_page_elements(page_img, json_w, json_h, page_context=page_context)
+            )
         except Exception as e:
-            raise RuntimeError(f"[OCR] Page {i + 1}: OCR extraction failed: {e}") from e
+            raise RuntimeError(f"[OCR] Page {page_index + 1}: OCR extraction failed: {e}") from e
 
         merged_elements, merge_stats = merge_ir_elements(mineru_elements, ocr_elements, gen._has_bbox_overlap)
+        page_context.register_stage_page_ir(
+            "merged_final",
+            build_page_ir(page_index=page_index, page_size=(float(json_w), float(json_h)), elements=merged_elements),
+        )
         print(
-            f"[OCR] Page {i + 1}: "
+            f"[OCR] Page {page_index + 1}: "
             f"candidates={merge_stats['overlay_candidates']}, "
             f"group_replaced={merge_stats['group_replaced']}, "
             f"overlap_replaced={merge_stats['overlap_replaced']}, "
             f"added={merge_stats['overlay_added']}"
         )
 
-        gen.process_page(slide, merged_elements, page_img, page_size=page_size, page_index=i, debug_images=debug_images)
+        gen.process_page(
+            slide,
+            merged_elements,
+            page_img,
+            page_size=page_size,
+            page_index=page_index,
+            debug_images=debug_images,
+            context=page_context,
+        )
     gen.save()
     print(f"Saved to {output_ppt_path}")

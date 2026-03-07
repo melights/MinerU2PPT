@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..ir import normalize_element_ir, normalize_bbox
+from ..ir import build_page_ir, normalize_element_ir, normalize_bbox
 
 
 class OCRAdapter:
@@ -11,9 +11,43 @@ class OCRAdapter:
     def __init__(self, ocr_engine):
         self.ocr_engine = ocr_engine
 
-    def extract_page_elements(self, page_image, json_w: float, json_h: float) -> list[dict[str, Any]]:
-        ocr_elements = self.ocr_engine.extract_text_elements(page_image, json_w, json_h)
-        return [self._to_ir_text_element(elem) for elem in ocr_elements if elem.get("bbox")]
+    def extract_page_elements(
+        self,
+        page_image,
+        json_w: float,
+        json_h: float,
+        page_context: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        stage_elements = self.ocr_engine.extract_text_elements(
+            page_image,
+            json_w,
+            json_h,
+            return_stage_elements=True,
+        )
+
+        if isinstance(stage_elements, list):
+            before_refined = stage_elements
+            after_refined = stage_elements
+        else:
+            before_refined = stage_elements.get("before_refined_elements", [])
+            after_refined = stage_elements.get("after_refined_elements", [])
+
+        before_refined_ir = [self._to_ir_text_element(elem) for elem in before_refined if elem.get("bbox")]
+        after_refined_ir = [self._to_ir_text_element(elem) for elem in after_refined if elem.get("bbox")]
+
+        if page_context is not None:
+            page_index = page_context.page_index
+            page_size = (float(json_w), float(json_h))
+            page_context.register_stage_page_ir(
+                "ocr_before_refined_elements",
+                build_page_ir(page_index=page_index, page_size=page_size, elements=before_refined_ir),
+            )
+            page_context.register_stage_page_ir(
+                "ocr_after_refined_elements",
+                build_page_ir(page_index=page_index, page_size=page_size, elements=after_refined_ir),
+            )
+
+        return after_refined_ir
 
     def _to_ir_text_element(self, elem: dict[str, Any]) -> dict[str, Any]:
         bbox = normalize_bbox(elem.get("bbox"))

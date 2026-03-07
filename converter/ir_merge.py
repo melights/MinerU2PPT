@@ -141,6 +141,40 @@ def _sync_text_and_runs(elem: dict[str, Any]) -> dict[str, Any]:
     return elem
 
 
+def _inherit_overlay_bold_from_base(
+    base_elem: dict[str, Any],
+    overlay_elem: dict[str, Any],
+) -> dict[str, Any]:
+    if base_elem.get("type") != "text" or overlay_elem.get("type") != "text":
+        return overlay_elem
+
+    inherited_bold = bool((base_elem.get("style") or {}).get("bold", False))
+
+    merged_style = dict(overlay_elem.get("style") or {})
+    merged_style["bold"] = inherited_bold
+
+    text_runs = overlay_elem.get("text_runs")
+    merged_runs = text_runs
+    if isinstance(text_runs, list):
+        merged_runs = [
+            {
+                **run,
+                "style": {
+                    **(run.get("style") or {}),
+                    "bold": inherited_bold,
+                },
+            }
+            for run in text_runs
+            if isinstance(run, dict)
+        ]
+
+    return {
+        **overlay_elem,
+        "style": merged_style,
+        "text_runs": merged_runs,
+    }
+
+
 def _combine_overlay_members(members: list[dict[str, Any]]) -> dict[str, Any]:
     ordered = sorted([m for m in members if m.get("bbox")], key=_sort_key)
     template = ordered[0]
@@ -273,7 +307,7 @@ def merge_ir_elements(
         for t_idx in target_indices:
             t_elem = merged[t_idx]
             if t_elem.get("type") == o_elem.get("type") == "text":
-                merged[t_idx] = o_elem
+                merged[t_idx] = _inherit_overlay_bold_from_base(t_elem, o_elem)
                 replaced_any = True
                 group_replaced += 1
         if replaced_any:
@@ -302,7 +336,7 @@ def merge_ir_elements(
             if not t_bbox:
                 continue
             if has_overlap(o_bbox, t_bbox):
-                merged[t_idx] = o_elem
+                merged[t_idx] = _inherit_overlay_bold_from_base(t_elem, o_elem)
                 replaced = True
                 overlap_replaced += 1
                 break
