@@ -24,6 +24,7 @@ OCR_BBOX_PAD_RATIO = 0.05
 OCR_BBOX_MIN_PAD_PIXELS = 1
 ROW_FONT_DISTANCE_THRESHOLD = 60.0
 ROW_FONT_MIN_PIXEL_RATIO = 0.005
+COL_FONT_MIN_PIXEL_RATIO = 0.005
 ROW_NON_BG_DISTANCE_THRESHOLD = 55.0
 
 
@@ -572,9 +573,9 @@ def refine_ocr_text_elements(
                 span_bbox = span.get("bbox")
                 if span_bbox:
                     new_span_bbox = [
-                        span_bbox[0],
+                        refined_line_bbox[0],
                         refined_line_bbox[1],
-                        span_bbox[2],
+                        refined_line_bbox[2],
                         refined_line_bbox[3],
                     ]
                 else:
@@ -825,6 +826,27 @@ def _build_row_font_flags(page_image, x1, x2, y1, y2, font_color):
     return [count >= min_pixels for count in row_match_counts]
 
 
+def _build_col_font_flags(page_image, x1, x2, y1, y2, font_color):
+    h, w = page_image.shape[:2]
+    x1 = max(0, min(int(x1), w))
+    x2 = max(0, min(int(x2), w))
+    y1 = max(0, min(int(y1), h))
+    y2 = max(0, min(int(y2), h))
+
+    if x2 <= x1 or y2 <= y1:
+        return []
+
+    roi = page_image[y1:y2, x1:x2]
+    if roi.size == 0:
+        return []
+
+    diff = np.linalg.norm(roi.astype(np.float32) - np.array(font_color, dtype=np.float32), axis=2)
+    col_match_counts = np.sum(diff < ROW_FONT_DISTANCE_THRESHOLD, axis=0)
+    min_pixels = max(1, int((y2 - y1) * COL_FONT_MIN_PIXEL_RATIO))
+
+    return [count >= min_pixels for count in col_match_counts]
+
+
 def _refine_bbox_vertical(page_image, bbox_px):
     h, w = page_image.shape[:2]
     x1, y1, x2, y2 = _clamp_pixel_bbox(bbox_px, w, h)
@@ -832,77 +854,107 @@ def _refine_bbox_vertical(page_image, bbox_px):
         return [x1, y1, x2, y2], [x1, y1, x2, y2]
 
     pad_bbox = _expand_bbox_with_pad([x1, y1, x2, y2], w, h)
-    row_flags = _build_row_font_cache(page_image, [x1, y1, x2, y2], pad_bbox)
-    if not row_flags:
-        return [x1, y1, x2, y2], pad_bbox
+    pad_x1, pad_y1, pad_x2, pad_y2 = pad_bbox
 
     bg_color = extract_background_color(page_image, [x1, y1, x2, y2])
     font_color, _, _ = extract_font_color(page_image, [x1, y1, x2, y2], bg_color)
 
-    pad_y1 = pad_bbox[1]
-    orig_top_idx = y1 - pad_y1
-    orig_bottom_idx = y2 - pad_y1
+    row_flags = _build_row_font_flags(page_image, pad_x1, pad_x2, pad_y1, pad_y2, font_color)
+    col_flags = _build_col_font_flags(page_image, pad_x1, pad_x2, pad_y1, pad_y2, font_color)
 
-    in_box_flags = row_flags[orig_top_idx:orig_bottom_idx]
-    true_positions = [idx for idx, has_font in enumerate(in_box_flags) if has_font]
-    if not true_positions:
-        return [x1, y1, x2, y2], pad_bbox
+    refined_x1, refined_y1, refined_x2, refined_y2 = x1, y1, x2, y2
 
-    first_idx = orig_top_idx + true_positions[0]
-    last_idx = orig_top_idx + true_positions[-1]
+    if row_flags:
+        orig_top_idx = y1 - pad_y1
+        orig_bottom_idx = y2 - pad_y1
 
-    refined_y1 = pad_y1 + first_idx
-    refined_y2 = pad_y1 + last_idx + 1
+        in_box_flags = row_flags[orig_top_idx:orig_bottom_idx]
+        true_positions = [idx for idx, has_font in enumerate(in_box_flags) if has_font]
 
-    trimmed_top = refined_y1 > y1
-    trimmed_bottom = refined_y2 < y2
+        if true_positions:
+            first_idx = orig_top_idx + true_positions[0]
+            last_idx = orig_top_idx + true_positions[-1]
 
-    # second wave extend for untouched side only
-    if not trimmed_top:
-        scan = first_idx - 1
-        while scan >= 0 and row_flags[scan]:
-            refined_y1 = pad_y1 + scan
-            scan -= 1
+            refined_y1 = pad_y1 + first_idx
+            refined_y2 = pad_y1 + last_idx + 1
 
-    if not trimmed_bottom:
-        scan = last_idx + 1
-        while scan < len(row_flags) and row_flags[scan]:
-            refined_y2 = pad_y1 + scan + 1
-            scan += 1
+            trimmed_top = refined_y1 > y1
+            trimmed_bottom = refined_y2 < y2
 
-    # Remove margin-based expansion and align boundaries with precomputed row flags.
-    full_row_flags = _build_row_font_flags(page_image, x1, x2, pad_bbox[1], pad_bbox[3], font_color)
+            if not trimmed_top:
+                scan = first_idx - 1
+                while scan >= 0 and row_flags[scan]:
+                    refined_y1 = pad_y1 + scan
+                    scan -= 1
 
-    while refined_y1 + 1 < refined_y2 and not full_row_flags[refined_y1 - pad_bbox[1]]:
-        refined_y1 += 1
+            if not trimmed_bottom:
+                scan = last_idx + 1
+                while scan < len(row_flags) and row_flags[scan]:
+                    refined_y2 = pad_y1 + scan + 1
+                    scan += 1
 
-    while refined_y1 > pad_bbox[1] and full_row_flags[refined_y1 - 1 - pad_bbox[1]]:
-        refined_y1 -= 1
+            while refined_y1 + 1 < refined_y2 and not row_flags[refined_y1 - pad_y1]:
+                refined_y1 += 1
 
-    while refined_y2 - 1 > refined_y1 and not full_row_flags[refined_y2 - 1 - pad_bbox[1]]:
-        refined_y2 -= 1
+            while refined_y1 > pad_y1 and row_flags[refined_y1 - 1 - pad_y1]:
+                refined_y1 -= 1
 
-    while refined_y2 < pad_bbox[3] and full_row_flags[refined_y2 - pad_bbox[1]]:
-        refined_y2 += 1
+            while refined_y2 - 1 > refined_y1 and not row_flags[refined_y2 - 1 - pad_y1]:
+                refined_y2 -= 1
 
+            while refined_y2 < pad_y2 and row_flags[refined_y2 - pad_y1]:
+                refined_y2 += 1
+
+    if col_flags:
+        orig_left_idx = x1 - pad_x1
+        orig_right_idx = x2 - pad_x1
+
+        in_box_flags = col_flags[orig_left_idx:orig_right_idx]
+        true_positions = [idx for idx, has_font in enumerate(in_box_flags) if has_font]
+
+        if true_positions:
+            first_idx = orig_left_idx + true_positions[0]
+            last_idx = orig_left_idx + true_positions[-1]
+
+            refined_x1 = pad_x1 + first_idx
+            refined_x2 = pad_x1 + last_idx + 1
+
+            trimmed_left = refined_x1 > x1
+            trimmed_right = refined_x2 < x2
+
+            if not trimmed_left:
+                scan = first_idx - 1
+                while scan >= 0 and col_flags[scan]:
+                    refined_x1 = pad_x1 + scan
+                    scan -= 1
+
+            if not trimmed_right:
+                scan = last_idx + 1
+                while scan < len(col_flags) and col_flags[scan]:
+                    refined_x2 = pad_x1 + scan + 1
+                    scan += 1
+
+            while refined_x1 + 1 < refined_x2 and not col_flags[refined_x1 - pad_x1]:
+                refined_x1 += 1
+
+            while refined_x1 > pad_x1 and col_flags[refined_x1 - 1 - pad_x1]:
+                refined_x1 -= 1
+
+            while refined_x2 - 1 > refined_x1 and not col_flags[refined_x2 - 1 - pad_x1]:
+                refined_x2 -= 1
+
+            while refined_x2 < pad_x2 and col_flags[refined_x2 - pad_x1]:
+                refined_x2 += 1
+
+    refined_x1 = max(0, min(refined_x1, w))
+    refined_x2 = max(0, min(refined_x2, w))
     refined_y1 = max(0, min(refined_y1, h))
     refined_y2 = max(0, min(refined_y2, h))
-    if refined_y2 <= refined_y1:
+
+    if refined_x2 <= refined_x1 or refined_y2 <= refined_y1:
         return [x1, y1, x2, y2], pad_bbox
 
-    return [x1, refined_y1, x2, refined_y2], pad_bbox
-
-
-def _build_row_font_cache(page_image, original_bbox_px, pad_bbox_px):
-    ox1, oy1, ox2, oy2 = original_bbox_px
-    px1, py1, px2, py2 = pad_bbox_px
-
-    if px2 <= px1 or py2 <= py1:
-        return []
-
-    bg_color = extract_background_color(page_image, original_bbox_px)
-    font_color, _, _ = extract_font_color(page_image, original_bbox_px, bg_color)
-    return _build_row_font_flags(page_image, px1, px2, py1, py2, font_color)
+    return [refined_x1, refined_y1, refined_x2, refined_y2], pad_bbox
 
 
 def _expand_bbox_with_pad(bbox_px, img_w, img_h):

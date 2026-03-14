@@ -40,7 +40,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 - **Forced OCR-First Pipeline (PaddleOCR)**:
   - OCR is mandatory in CLI and GUI paths.
   - In `PPTGenerator.process_page`, OCR extraction runs before per-element analysis. OCR failures raise exceptions and abort conversion.
-  - OCR bbox refinement uses a two-stage vertical strategy (pad window, inner trim, then conditional extend).
+  - OCR bbox refinement uses a unified XY strategy in one flow (pad window, inner trim, then conditional extend on both Y and X boundaries).
   - Overlap handling uses grouping + union (instead of overlap-drop), with OCR kept as the final text source.
   - Merge statistics are emitted as `[OCR]` logs (`candidates`, `groups`, `merged`, `added`).
   - GUI caches a shared `PaddleOCREngine` instance (`self.shared_ocr_engine`) and reuses it across single/batch tasks to avoid repeated initialization overhead.
@@ -61,7 +61,14 @@ This file provides guidance to Claude Code when working with code in this reposi
 - Real-sample OCR structure and bbox alignment checks use demo assets under `demo/` (`tests/integration/test_case1_ocr*.py`, `tests/integration/test_case3_ocr_bbox_bottom.py`).
 
 ## Docs Index
+- Documentation domains:
+  - `docs/architecture/`
+  - `docs/testing/`
+  - `docs/core-flow/`
+  - `docs/api/`
 - Core flow:
   - `docs/core-flow/font-size-normalization-pre-render.md`
+  - `docs/core-flow/ocr-bbox-xy-refine-flow.md`
 - Testing:
   - `docs/testing/font-size-normalization-testing.md`
+  - `docs/testing/ocr-bbox-refine-testing.md`
