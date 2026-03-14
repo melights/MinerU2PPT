@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 IR_ELEMENT_TYPES = {"text", "image"}
@@ -26,6 +26,7 @@ class TextIR:
     is_discarded: bool = False
     group_id: str | None = None
     text_runs: list[TextRunIR] | None = None
+    lines: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -37,14 +38,18 @@ class ImageIR:
     style: dict[str, Any]
     is_discarded: bool = False
     group_id: str | None = None
-    text_elements: list[dict[str, Any]] = field(default_factory=list)
+    text_elements: list[TextIR] = field(default_factory=list)
+    crop_pixels: Any | None = None
+
+
+ElementIR = TextIR | ImageIR
 
 
 @dataclass(frozen=True)
 class PageIR:
     page_index: int
     page_size: tuple[float, float] | None
-    elements: list[dict[str, Any]]
+    elements: list[ElementIR]
 
 
 @dataclass(frozen=True)
@@ -128,77 +133,69 @@ def compose_text_from_lines_or_spans(
     return str(fallback_text or "")
 
 
-def rebuild_text_from_runs(text_runs: list[dict[str, Any]]) -> str:
+def _coerce_text_run(run: Any, index: int = 0) -> TextRunIR:
+    if isinstance(run, TextRunIR):
+        return TextRunIR(
+            text=str(run.text),
+            bbox=normalize_bbox(run.bbox),
+            line_index=int(run.line_index),
+            style=normalize_style(run.style),
+        )
+
+    if not isinstance(run, dict):
+        raise ValueError("TextRunIR must be a dict or TextRunIR")
+    if run.get("bbox") is None:
+        raise ValueError("TextRunIR.bbox is required")
+
+    return TextRunIR(
+        text=str(run.get("text", "")),
+        bbox=normalize_bbox(run.get("bbox")),
+        line_index=int(run.get("line_index", index)),
+        style=normalize_style(run.get("style") or {}),
+    )
+
+
+def rebuild_text_from_runs(text_runs: list[TextRunIR]) -> str:
     if not text_runs:
         return ""
 
-    grouped: dict[int, list[dict[str, Any]]] = {}
-    for run in text_runs:
-        line_index = int(run.get("line_index", 0))
-        grouped.setdefault(line_index, []).append(run)
+    normalized_runs = [_coerce_text_run(run, index) for index, run in enumerate(text_runs)]
+
+    grouped: dict[int, list[TextRunIR]] = {}
+    for run in normalized_runs:
+        grouped.setdefault(int(run.line_index), []).append(run)
 
     line_texts: list[str] = []
     for line_index in sorted(grouped.keys()):
         runs = sorted(
             grouped[line_index],
-            key=lambda run: (
-                (run.get("bbox") or [0.0, 0.0, 0.0, 0.0])[0],
-                (run.get("bbox") or [0.0, 0.0, 0.0, 0.0])[1],
-            ),
+            key=lambda run: (run.bbox[0], run.bbox[1]),
         )
-        line_texts.append("".join(str(run.get("text", "")) for run in runs))
+        line_texts.append("".join(str(run.text) for run in runs))
 
     return "\n".join(line_texts)
 
 
-def normalize_text_runs(text_runs: Any) -> list[dict[str, Any]] | None:
+def normalize_text_runs(text_runs: Any) -> list[TextRunIR] | None:
     if text_runs is None:
         return None
 
     if not isinstance(text_runs, list):
         raise ValueError("TextIR.text_runs must be a list or None")
 
-    normalized: list[dict[str, Any]] = []
-    for index, run in enumerate(text_runs):
-        if not isinstance(run, dict):
-            raise ValueError("TextRunIR must be a dict")
-        if run.get("bbox") is None:
-            raise ValueError("TextRunIR.bbox is required")
-
-        normalized_run = {
-            "text": str(run.get("text", "")),
-            "bbox": normalize_bbox(run.get("bbox")),
-            "line_index": int(run.get("line_index", index)),
-            "style": normalize_style(run.get("style") or {}),
-        }
-        normalized.append(normalized_run)
-
-    normalized.sort(key=lambda run: (run["line_index"], run["bbox"][1], run["bbox"][0]))
+    normalized = [_coerce_text_run(run, index) for index, run in enumerate(text_runs)]
+    normalized.sort(key=lambda run: (run.line_index, run.bbox[1], run.bbox[0]))
     return normalized
-
-
-def _to_text_run_models(text_runs: list[dict[str, Any]] | None) -> list[TextRunIR] | None:
-    if text_runs is None:
-        return None
-    return [
-        TextRunIR(
-            text=run["text"],
-            bbox=list(run["bbox"]),
-            line_index=int(run.get("line_index", 0)),
-            style=dict(run.get("style") or {}),
-        )
-        for run in text_runs
-    ]
 
 
 def _build_text_runs_from_lines_or_spans(
     element: dict[str, Any],
     bbox: list[float],
     style: dict[str, Any],
-) -> list[dict[str, Any]] | None:
+) -> list[TextRunIR] | None:
     lines = element.get("lines")
     if isinstance(lines, list) and lines:
-        runs: list[dict[str, Any]] = []
+        runs: list[TextRunIR] = []
         for line_index, line in enumerate(lines):
             if not isinstance(line, dict):
                 continue
@@ -208,12 +205,12 @@ def _build_text_runs_from_lines_or_spans(
                 line_text = str(line.get("text", ""))
                 if line_text:
                     runs.append(
-                        {
-                            "text": line_text,
-                            "bbox": line_bbox,
-                            "line_index": line_index,
-                            "style": style,
-                        }
+                        TextRunIR(
+                            text=line_text,
+                            bbox=line_bbox,
+                            line_index=line_index,
+                            style=style,
+                        )
                     )
                 continue
             for span in spans:
@@ -225,19 +222,19 @@ def _build_text_runs_from_lines_or_spans(
                 span_bbox = normalize_bbox(span.get("bbox") or line_bbox)
                 span_style = normalize_style(span.get("style") or style)
                 runs.append(
-                    {
-                        "text": span_text,
-                        "bbox": span_bbox,
-                        "line_index": line_index,
-                        "style": span_style,
-                    }
+                    TextRunIR(
+                        text=span_text,
+                        bbox=span_bbox,
+                        line_index=line_index,
+                        style=span_style,
+                    )
                 )
         if runs:
             return normalize_text_runs(runs)
 
     spans = element.get("spans")
     if isinstance(spans, list) and spans:
-        span_runs: list[dict[str, Any]] = []
+        span_runs: list[TextRunIR] = []
         for span in spans:
             if not isinstance(span, dict):
                 continue
@@ -246,12 +243,12 @@ def _build_text_runs_from_lines_or_spans(
                 continue
             span_bbox = normalize_bbox(span.get("bbox") or bbox)
             span_runs.append(
-                {
-                    "text": span_text,
-                    "bbox": span_bbox,
-                    "line_index": 0,
-                    "style": normalize_style(span.get("style") or style),
-                }
+                TextRunIR(
+                    text=span_text,
+                    bbox=span_bbox,
+                    line_index=0,
+                    style=normalize_style(span.get("style") or style),
+                )
             )
         if span_runs:
             return normalize_text_runs(span_runs)
@@ -259,32 +256,83 @@ def _build_text_runs_from_lines_or_spans(
     return None
 
 
-def materialize_text_runs_for_element(element: dict[str, Any]) -> dict[str, Any]:
+def _normalize_lines(lines: Any, fallback_bbox: list[float]) -> list[dict[str, Any]] | None:
+    if lines is None:
+        return None
+    if not isinstance(lines, list):
+        raise ValueError("TextIR.lines must be a list or None")
+
+    normalized_lines: list[dict[str, Any]] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        line_bbox = normalize_bbox(line.get("bbox") or fallback_bbox)
+        raw_spans = line.get("spans") or []
+        normalized_spans: list[dict[str, Any]] = []
+        for span in raw_spans:
+            if not isinstance(span, dict):
+                continue
+            span_text = str(span.get("content", ""))
+            span_bbox = normalize_bbox(span.get("bbox") or line_bbox)
+            normalized_spans.append(
+                {
+                    "bbox": span_bbox,
+                    "content": span_text,
+                    "type": str(span.get("type", "text") or "text"),
+                    "style": normalize_style(span.get("style") or {}),
+                }
+            )
+
+        if normalized_spans:
+            normalized_lines.append({"bbox": line_bbox, "spans": normalized_spans})
+        else:
+            normalized_lines.append({"bbox": line_bbox, "spans": []})
+
+    return normalized_lines
+
+
+def _normalize_image_text_elements(raw_text_elements: Any) -> list[TextIR]:
+    if raw_text_elements is None:
+        return []
+    if not isinstance(raw_text_elements, list):
+        raise ValueError("ImageIR.text_elements must be a list")
+
+    normalized: list[TextIR] = []
+    for entry in raw_text_elements:
+        normalized_entry = normalize_element_ir(entry)
+        if not isinstance(normalized_entry, TextIR):
+            raise ValueError("ImageIR.text_elements must contain text IR elements")
+        normalized.append(normalized_entry)
+    return normalized
+
+
+def materialize_text_runs_for_element(element: Any) -> ElementIR:
     normalized = normalize_element_ir(element)
-    if normalized.get("type") != "text":
+    if isinstance(normalized, ImageIR):
         return normalized
 
-    if isinstance(normalized.get("text_runs"), list):
+    if isinstance(normalized.text_runs, list):
         return normalized
 
+    source_element = element if isinstance(element, dict) else {}
     materialized_runs = _build_text_runs_from_lines_or_spans(
-        normalized,
-        normalized["bbox"],
-        normalized.get("style") or default_style(),
+        source_element,
+        normalized.bbox,
+        normalized.style or default_style(),
     )
 
     if not materialized_runs:
-        text_value = str(normalized.get("text") or "")
+        text_value = str(normalized.text or "")
         if not text_value:
             return normalized
         line_texts = text_value.split("\n")
         materialized_runs = [
-            {
-                "text": line_text,
-                "bbox": normalized["bbox"],
-                "line_index": idx,
-                "style": dict(normalized.get("style") or {}),
-            }
+            TextRunIR(
+                text=line_text,
+                bbox=list(normalized.bbox),
+                line_index=idx,
+                style=dict(normalized.style or {}),
+            )
             for idx, line_text in enumerate(line_texts)
             if line_text
         ]
@@ -293,20 +341,54 @@ def materialize_text_runs_for_element(element: dict[str, Any]) -> dict[str, Any]
         return normalized
 
     rebuilt = rebuild_text_from_runs(materialized_runs)
-    return {
-        **normalized,
-        "text_runs": materialized_runs,
-        "text": rebuilt,
-    }
+    return replace(normalized, text_runs=materialized_runs, text=rebuilt)
 
 
-def materialize_text_runs_for_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def materialize_text_runs_for_elements(elements: list[Any]) -> list[ElementIR]:
     return [materialize_text_runs_for_element(element) for element in elements]
 
 
-def normalize_element_ir(element: dict[str, Any]) -> dict[str, Any]:
+def normalize_element_ir(element: Any) -> ElementIR:
+    if isinstance(element, TextIR):
+        text_runs = normalize_text_runs(element.text_runs)
+        text = str(element.text or "")
+        if text_runs is not None and not text:
+            text = rebuild_text_from_runs(text_runs)
+
+        normalized_bbox = normalize_bbox(element.bbox)
+        normalized_lines = _normalize_lines(element.lines, normalized_bbox)
+        text_ir = TextIR(
+            type="text",
+            bbox=normalized_bbox,
+            text=text,
+            source=str(element.source or "unknown"),
+            order=[float(element.order[0]), float(element.order[1])] if len(element.order) >= 2 else _fallback_order(normalized_bbox),
+            style=normalize_style(element.style),
+            is_discarded=bool(element.is_discarded),
+            group_id=str(element.group_id) if element.group_id is not None else None,
+            text_runs=text_runs,
+            lines=normalized_lines,
+        )
+
+        if not text_ir.text and not text_ir.text_runs:
+            raise ValueError("Text IR element requires text or text_runs")
+        return text_ir
+
+    if isinstance(element, ImageIR):
+        return ImageIR(
+            type="image",
+            bbox=normalize_bbox(element.bbox),
+            source=str(element.source or "unknown"),
+            order=[float(element.order[0]), float(element.order[1])] if len(element.order) >= 2 else _fallback_order(normalize_bbox(element.bbox)),
+            style=normalize_style(element.style),
+            is_discarded=bool(element.is_discarded),
+            group_id=str(element.group_id) if element.group_id is not None else None,
+            text_elements=_normalize_image_text_elements(element.text_elements),
+            crop_pixels=element.crop_pixels,
+        )
+
     if not isinstance(element, dict):
-        raise ValueError("IR element must be a dict")
+        raise ValueError("IR element must be a dict/TextIR/ImageIR")
 
     elem_type = element.get("type")
     if elem_type not in IR_ELEMENT_TYPES:
@@ -351,37 +433,16 @@ def normalize_element_ir(element: dict[str, Any]) -> dict[str, Any]:
             style=style,
             is_discarded=is_discarded,
             group_id=str(group_id) if group_id is not None else None,
-            text_runs=_to_text_run_models(text_runs),
+            text_runs=text_runs,
+            lines=_normalize_lines(element.get("lines"), bbox),
         )
 
-        normalized: dict[str, Any] = {
-            "type": text_ir.type,
-            "bbox": text_ir.bbox,
-            "text": text_ir.text,
-            "source": text_ir.source,
-            "order": text_ir.order,
-            "style": text_ir.style,
-            "is_discarded": text_ir.is_discarded,
-            "group_id": text_ir.group_id,
-            "text_runs": [
-                {
-                    "text": run.text,
-                    "bbox": run.bbox,
-                    "line_index": run.line_index,
-                    "style": run.style,
-                }
-                for run in (text_ir.text_runs or [])
-            ]
-            if text_ir.text_runs is not None
-            else None,
-        }
-
-        if not normalized.get("text") and not normalized.get("text_runs"):
+        if not text_ir.text and not text_ir.text_runs:
             raise ValueError("Text IR element requires text or text_runs")
 
-        return normalized
+        return text_ir
 
-    image_ir = ImageIR(
+    return ImageIR(
         type="image",
         bbox=bbox,
         source=source,
@@ -389,42 +450,32 @@ def normalize_element_ir(element: dict[str, Any]) -> dict[str, Any]:
         style=style,
         is_discarded=is_discarded,
         group_id=str(group_id) if group_id is not None else None,
-        text_elements=list(element.get("text_elements", [])),
+        text_elements=_normalize_image_text_elements(element.get("text_elements", [])),
+        crop_pixels=element.get("crop_pixels"),
     )
 
-    return {
-        "type": image_ir.type,
-        "bbox": image_ir.bbox,
-        "source": image_ir.source,
-        "order": image_ir.order,
-        "style": image_ir.style,
-        "is_discarded": image_ir.is_discarded,
-        "group_id": image_ir.group_id,
-        "text_elements": image_ir.text_elements,
-    }
 
-
-def normalize_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_elements(elements: list[Any]) -> list[ElementIR]:
     return [normalize_element_ir(elem) for elem in elements]
 
 
 def validate_ir_elements(
-    elements: list[dict[str, Any]],
+    elements: list[Any],
     require_text_runs_consistency: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[ElementIR]:
     normalized = normalize_elements(elements)
     if not require_text_runs_consistency:
         return normalized
 
     for element in normalized:
-        if element.get("type") != "text":
+        if not isinstance(element, TextIR):
             continue
-        text_runs = element.get("text_runs")
+        text_runs = element.text_runs
         if not isinstance(text_runs, list):
             continue
 
         rebuilt = rebuild_text_from_runs(text_runs)
-        if element.get("text", "") != rebuilt:
+        if element.text != rebuilt:
             raise ValueError(
                 "TextIR.text is inconsistent with TextIR.text_runs rebuild result"
             )
@@ -432,17 +483,17 @@ def validate_ir_elements(
     return normalized
 
 
-def sort_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def sort_elements(elements: list[ElementIR]) -> list[ElementIR]:
     return sorted(
         elements,
         key=lambda elem: (
-            elem.get("order", [elem["bbox"][1], elem["bbox"][0]])[0],
-            elem.get("order", [elem["bbox"][1], elem["bbox"][0]])[1],
+            (elem.order if len(elem.order) >= 2 else [elem.bbox[1], elem.bbox[0]])[0],
+            (elem.order if len(elem.order) >= 2 else [elem.bbox[1], elem.bbox[0]])[1],
         ),
     )
 
 
-def build_page_ir(page_index: int, page_size: tuple[float, float] | None, elements: list[dict[str, Any]]) -> PageIR:
+def build_page_ir(page_index: int, page_size: tuple[float, float] | None, elements: list[Any]) -> PageIR:
     normalized = normalize_elements(elements)
     sorted_elements = sort_elements(normalized)
     return PageIR(page_index=page_index, page_size=page_size, elements=sorted_elements)

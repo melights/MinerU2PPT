@@ -1,6 +1,7 @@
 import unittest
 
 from converter.adapters.mineru_adapter import MinerUAdapter, MinerUPageData
+from converter.ir import ImageIR, TextIR
 
 
 class TestMinerUAdapter(unittest.TestCase):
@@ -24,11 +25,12 @@ class TestMinerUAdapter(unittest.TestCase):
 
         elements = self.adapter.extract_page_elements(MinerUPageData.from_dict(page))
         self.assertEqual(len(elements), 1)
-        self.assertEqual(elements[0]["type"], "text")
-        self.assertEqual(elements[0]["source"], "mineru")
-        self.assertFalse(elements[0]["is_discarded"])
-        self.assertTrue(elements[0]["style"]["bold"])
-        self.assertIsNone(elements[0]["text_runs"])
+        self.assertIsInstance(elements[0], TextIR)
+        self.assertEqual(elements[0].type, "text")
+        self.assertEqual(elements[0].source, "mineru")
+        self.assertFalse(elements[0].is_discarded)
+        self.assertTrue(elements[0].style["bold"])
+        self.assertIsNone(elements[0].text_runs)
 
     def test_maps_list_blocks_into_multiple_text_elements(self):
         page = {
@@ -60,8 +62,8 @@ class TestMinerUAdapter(unittest.TestCase):
 
         elements = self.adapter.extract_page_elements(MinerUPageData.from_dict(page))
         self.assertEqual(len(elements), 2)
-        self.assertTrue(all(elem["type"] == "text" for elem in elements))
-        self.assertEqual(elements[0]["group_id"], elements[1]["group_id"])
+        self.assertTrue(all(isinstance(elem, TextIR) for elem in elements))
+        self.assertEqual(elements[0].group_id, elements[1].group_id)
 
     def test_include_text_runs_generates_runs_for_mineru(self):
         page = {
@@ -87,9 +89,9 @@ class TestMinerUAdapter(unittest.TestCase):
 
         elements = self.adapter.extract_page_elements(MinerUPageData.from_dict(page), include_text_runs=True)
         self.assertEqual(len(elements), 1)
-        self.assertIsInstance(elements[0]["text_runs"], list)
-        self.assertEqual(len(elements[0]["text_runs"]), 2)
-        self.assertEqual(elements[0]["text_runs"][0]["bbox"], [0.0, 0.0, 40.0, 20.0])
+        self.assertIsInstance(elements[0].text_runs, list)
+        self.assertEqual(len(elements[0].text_runs), 2)
+        self.assertEqual(elements[0].text_runs[0].bbox, [0.0, 0.0, 40.0, 20.0])
 
     def test_maps_image_caption_and_discarded(self):
         page = {
@@ -114,12 +116,12 @@ class TestMinerUAdapter(unittest.TestCase):
         }
 
         elements = self.adapter.extract_page_elements(MinerUPageData.from_dict(page))
-        image_elems = [e for e in elements if e["type"] == "image"]
-        text_elems = [e for e in elements if e["type"] == "text"]
+        image_elems = [e for e in elements if isinstance(e, ImageIR)]
+        text_elems = [e for e in elements if isinstance(e, TextIR)]
 
         self.assertEqual(len(image_elems), 1)
         self.assertEqual(len(text_elems), 2)
-        self.assertTrue(any(elem["is_discarded"] for elem in text_elems))
+        self.assertTrue(any(elem.is_discarded for elem in text_elems))
 
 
 if __name__ == "__main__":

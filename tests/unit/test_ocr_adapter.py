@@ -1,6 +1,7 @@
 import unittest
 
 from converter.adapters.ocr_adapter import OCRAdapter
+from converter.ir import TextIR
 
 
 class _FakeEngine:
@@ -36,14 +37,15 @@ class TestOCRAdapter(unittest.TestCase):
 
         self.assertEqual(len(elements), 1)
         elem = elements[0]
-        self.assertEqual(elem["type"], "text")
-        self.assertEqual(elem["source"], "ocr")
-        self.assertEqual(elem["text"], "HelloWorld")
-        self.assertGreater(elem["style"]["font_size"], 0)
-        self.assertEqual(elem["style"]["align"], "left")
-        self.assertIsInstance(elem["text_runs"], list)
-        self.assertEqual(len(elem["text_runs"]), 2)
-        self.assertEqual(elem["text_runs"][0]["bbox"], [20.0, 30.0, 70.0, 60.0])
+        self.assertIsInstance(elem, TextIR)
+        self.assertEqual(elem.type, "text")
+        self.assertEqual(elem.source, "ocr")
+        self.assertEqual(elem.text, "HelloWorld")
+        self.assertGreater(elem.style["font_size"], 0)
+        self.assertEqual(elem.style["align"], "left")
+        self.assertIsInstance(elem.text_runs, list)
+        self.assertEqual(len(elem.text_runs), 2)
+        self.assertEqual(elem.text_runs[0].bbox, [20.0, 30.0, 70.0, 60.0])
 
 
 if __name__ == "__main__":

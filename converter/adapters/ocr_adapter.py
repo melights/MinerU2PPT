@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..ir import build_page_ir, normalize_element_ir, normalize_bbox
+from ..ir import TextIR, TextRunIR, build_page_ir, normalize_bbox, normalize_element_ir
 
 
 class OCRAdapter:
@@ -17,7 +17,7 @@ class OCRAdapter:
         json_w: float,
         json_h: float,
         page_context: Any | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[TextIR]:
         stage_elements = self.ocr_engine.extract_text_elements(
             page_image,
             json_w,
@@ -32,8 +32,16 @@ class OCRAdapter:
             before_refined = stage_elements.get("before_refined_elements", [])
             after_refined = stage_elements.get("after_refined_elements", [])
 
-        before_refined_ir = [self._to_ir_text_element(elem) for elem in before_refined if elem.get("bbox")]
-        after_refined_ir = [self._to_ir_text_element(elem) for elem in after_refined if elem.get("bbox")]
+        before_refined_ir = [
+            self._to_ir_text_element(elem)
+            for elem in before_refined
+            if isinstance(elem, dict) and elem.get("bbox")
+        ]
+        after_refined_ir = [
+            self._to_ir_text_element(elem)
+            for elem in after_refined
+            if isinstance(elem, dict) and elem.get("bbox")
+        ]
 
         if page_context is not None:
             page_index = page_context.page_index
@@ -49,11 +57,11 @@ class OCRAdapter:
 
         return after_refined_ir
 
-    def _to_ir_text_element(self, elem: dict[str, Any]) -> dict[str, Any]:
+    def _to_ir_text_element(self, elem: dict[str, Any]) -> TextIR:
         bbox = normalize_bbox(elem.get("bbox"))
         font_size = max(6.0, float(bbox[3]) - float(bbox[1]))
 
-        text_runs: list[dict[str, Any]] = []
+        text_runs: list[TextRunIR] = []
         line_texts: list[str] = []
         normalized_lines: list[dict[str, Any]] = []
         lines = elem.get("lines", []) or []
@@ -78,12 +86,12 @@ class OCRAdapter:
                     "align": "left",
                 }
                 text_runs.append(
-                    {
-                        "text": span_text,
-                        "bbox": span_bbox,
-                        "line_index": line_index,
-                        "style": run_style,
-                    }
+                    TextRunIR(
+                        text=span_text,
+                        bbox=span_bbox,
+                        line_index=line_index,
+                        style=run_style,
+                    )
                 )
                 normalized_spans.append(
                     {
@@ -112,42 +120,42 @@ class OCRAdapter:
                 text_value = ""
 
             text_runs = [
-                {
-                    "text": text_value,
-                    "bbox": bbox,
-                    "line_index": 0,
-                    "style": {
+                TextRunIR(
+                    text=text_value,
+                    bbox=bbox,
+                    line_index=0,
+                    style={
                         "bold": False,
                         "font_size": font_size,
                         "align": "left",
                     },
-                }
+                )
             ]
             text = text_value
         else:
             text = "\n".join(line_texts)
 
         if not normalized_lines and text_runs:
-            grouped: dict[int, list[dict[str, Any]]] = {}
+            grouped: dict[int, list[TextRunIR]] = {}
             for run in text_runs:
-                grouped.setdefault(int(run.get("line_index", 0)), []).append(run)
+                grouped.setdefault(int(run.line_index), []).append(run)
             for line_idx in sorted(grouped.keys()):
-                line_runs = sorted(grouped[line_idx], key=lambda run: run["bbox"][0])
+                line_runs = sorted(grouped[line_idx], key=lambda run: run.bbox[0])
                 line_bbox = [
-                    min(run["bbox"][0] for run in line_runs),
-                    min(run["bbox"][1] for run in line_runs),
-                    max(run["bbox"][2] for run in line_runs),
-                    max(run["bbox"][3] for run in line_runs),
+                    min(run.bbox[0] for run in line_runs),
+                    min(run.bbox[1] for run in line_runs),
+                    max(run.bbox[2] for run in line_runs),
+                    max(run.bbox[3] for run in line_runs),
                 ]
                 normalized_lines.append(
                     {
                         "bbox": line_bbox,
                         "spans": [
                             {
-                                "bbox": run["bbox"],
-                                "content": run["text"],
+                                "bbox": run.bbox,
+                                "content": run.text,
                                 "type": "text",
-                                "style": run.get("style") or {},
+                                "style": run.style,
                             }
                             for run in line_runs
                         ],
@@ -170,4 +178,7 @@ class OCRAdapter:
                 "align": "left",
             },
         }
-        return normalize_element_ir(ir_elem)
+        normalized_text = normalize_element_ir(ir_elem)
+        if not isinstance(normalized_text, TextIR):
+            raise ValueError("Expected TextIR from OCR normalization")
+        return normalized_text

@@ -1,6 +1,8 @@
 import unittest
 
 from converter.ir import (
+    TextIR,
+    TextRunIR,
     normalize_element_ir,
     normalize_style,
     rebuild_text_from_runs,
@@ -19,10 +21,11 @@ class TestIR(unittest.TestCase):
         }
 
         normalized = normalize_element_ir(elem)
-        self.assertEqual(normalized["type"], "text")
-        self.assertEqual(normalized["bbox"], [20.0, 10.0, 60.0, 40.0])
-        self.assertEqual(normalized["order"], [10.0, 20.0])
-        self.assertEqual(normalized["style"]["align"], "left")
+        self.assertIsInstance(normalized, TextIR)
+        self.assertEqual(normalized.type, "text")
+        self.assertEqual(normalized.bbox, [20.0, 10.0, 60.0, 40.0])
+        self.assertEqual(normalized.order, [10.0, 20.0])
+        self.assertEqual(normalized.style["align"], "left")
 
     def test_normalize_style_minimum_fields(self):
         style = normalize_style({"bold": 1, "font_size": "18", "align": "CENTER"})
@@ -32,13 +35,13 @@ class TestIR(unittest.TestCase):
 
     def test_sort_elements_uses_y_then_x_fallback(self):
         elems = [
-            {"type": "text", "bbox": [100, 50, 120, 60], "text": "c", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [50, 100], "is_discarded": False, "source": "x", "group_id": None},
-            {"type": "text", "bbox": [10, 20, 30, 30], "text": "a", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [20, 10], "is_discarded": False, "source": "x", "group_id": None},
-            {"type": "text", "bbox": [40, 20, 55, 30], "text": "b", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [20, 40], "is_discarded": False, "source": "x", "group_id": None},
+            normalize_element_ir({"type": "text", "bbox": [100, 50, 120, 60], "text": "c", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [50, 100], "is_discarded": False, "source": "x", "group_id": None}),
+            normalize_element_ir({"type": "text", "bbox": [10, 20, 30, 30], "text": "a", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [20, 10], "is_discarded": False, "source": "x", "group_id": None}),
+            normalize_element_ir({"type": "text", "bbox": [40, 20, 55, 30], "text": "b", "style": {"bold": False, "font_size": None, "align": "left"}, "order": [20, 40], "is_discarded": False, "source": "x", "group_id": None}),
         ]
 
         sorted_elems = sort_elements(elems)
-        texts = [elem["text"] for elem in sorted_elems]
+        texts = [elem.text for elem in sorted_elems]
         self.assertEqual(texts, ["a", "b", "c"])
 
     def test_invalid_type_raises(self):
@@ -71,9 +74,9 @@ class TestIR(unittest.TestCase):
 
     def test_rebuild_text_from_runs_uses_line_index_and_geometry(self):
         runs = [
-            {"text": "B", "bbox": [20, 0, 25, 10], "line_index": 0},
-            {"text": "A", "bbox": [0, 0, 10, 10], "line_index": 0},
-            {"text": "C", "bbox": [0, 20, 10, 30], "line_index": 1},
+            TextRunIR(text="B", bbox=[20, 0, 25, 10], line_index=0),
+            TextRunIR(text="A", bbox=[0, 0, 10, 10], line_index=0),
+            TextRunIR(text="C", bbox=[0, 20, 10, 30], line_index=1),
         ]
         rebuilt = rebuild_text_from_runs(runs)
         self.assertEqual(rebuilt, "AB\nC")

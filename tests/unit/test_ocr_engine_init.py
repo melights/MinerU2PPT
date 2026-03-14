@@ -165,6 +165,38 @@ class TestPaddleOCREngineInit(unittest.TestCase):
         self.assertTrue(calls)
         self.assertTrue(all(device == "gpu" for device in calls))
 
+    def test_constructor_attempts_include_tuned_db_params(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            model_root = Path(tempdir) / "models" / "paddleocr"
+            self._create_local_model_tree(model_root)
+
+            engine = PaddleOCREngine(
+                device_policy="cpu",
+                model_root=str(model_root),
+                offline_only=True,
+                det_db_thresh=0.35,
+                det_db_box_thresh=0.8,
+                det_db_unclip_ratio=1.1,
+            )
+
+            attempts = list(engine._constructor_attempts_for_device("cpu", engine._build_model_dirs(model_root)))
+            self.assertTrue(attempts)
+
+            has_text_det_variant = any(
+                a.get("text_det_thresh") == 0.35
+                and a.get("text_det_box_thresh") == 0.8
+                and a.get("text_det_unclip_ratio") == 1.1
+                for a in attempts
+            )
+            has_legacy_variant = any(
+                a.get("det_db_thresh") == 0.35
+                and a.get("det_db_box_thresh") == 0.8
+                and a.get("det_db_unclip_ratio") == 1.1
+                for a in attempts
+            )
+            self.assertTrue(has_text_det_variant)
+            self.assertTrue(has_legacy_variant)
+
     def test_cpu_mode_uses_cpu_only(self):
         with tempfile.TemporaryDirectory() as tempdir:
             model_root = Path(tempdir) / "models" / "paddleocr"

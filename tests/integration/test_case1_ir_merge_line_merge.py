@@ -9,6 +9,7 @@ from converter.adapters.mineru_adapter import MinerUAdapter, MinerUPageData
 from converter.adapters.ocr_adapter import OCRAdapter
 from converter.ir_merge import merge_ir_elements
 from converter.ocr_merge import PaddleOCREngine
+from converter.ir import TextIR
 
 
 class TestCase1IRMergeLineMerge(unittest.TestCase):
@@ -36,9 +37,9 @@ class TestCase1IRMergeLineMerge(unittest.TestCase):
         target = [
             elem
             for elem in merged
-            if elem.get("type") == "text"
-            and "Design as Code," in (elem.get("text") or "")
-            and "Asset as Service" in (elem.get("text") or "")
+            if isinstance(elem, TextIR)
+            and "Design as Code," in (elem.text or "")
+            and "Asset as Service" in (elem.text or "")
         ]
 
         self.assertEqual(
@@ -47,9 +48,9 @@ class TestCase1IRMergeLineMerge(unittest.TestCase):
             f"Expected merged single text element for Design/Asset phrase, got {len(target)}",
         )
         self.assertGreaterEqual(stats.get("overlay_fragment_groups", 0), 1)
-        self.assertIsInstance(target[0].get("text_runs"), list)
+        self.assertIsInstance(target[0].text_runs, list)
         self.assertEqual(
-            "".join(run.get("text", "") for run in target[0]["text_runs"]),
+            "".join(run.text for run in target[0].text_runs),
             "Design as Code,Asset as Service",
         )
 

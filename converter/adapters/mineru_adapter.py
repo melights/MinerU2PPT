@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..ir import normalize_bbox, normalize_element_ir
+from ..ir import ElementIR, ImageIR, TextIR, TextRunIR, normalize_bbox, normalize_element_ir
 
 TEXT_TYPES = {"text", "title", "caption", "footnote", "footer", "header", "page_number", "list"}
 IMAGE_TYPES = {"image", "table", "figure", "formula"}
@@ -29,8 +29,8 @@ class MinerUPageData:
 class MinerUAdapter:
     """Map MinerU page data object into unified IR elements."""
 
-    def extract_page_elements(self, page_data: MinerUPageData, include_text_runs: bool = False) -> list[dict[str, Any]]:
-        elements: list[dict[str, Any]] = []
+    def extract_page_elements(self, page_data: MinerUPageData, include_text_runs: bool = False) -> list[ElementIR]:
+        elements: list[ElementIR] = []
 
         for item in page_data.para_blocks:
             elements.extend(self._to_ir_elements(item, is_discarded=False, include_text_runs=include_text_runs))
@@ -46,7 +46,7 @@ class MinerUAdapter:
 
         return elements
 
-    def _to_ir_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[dict[str, Any]]:
+    def _to_ir_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[ElementIR]:
         if not item or not item.get("bbox"):
             return []
 
@@ -62,13 +62,13 @@ class MinerUAdapter:
 
         return [self._text_element_from_block(item, is_discarded, include_text_runs=include_text_runs)]
 
-    def _list_to_text_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[dict[str, Any]]:
+    def _list_to_text_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[TextIR]:
         blocks = item.get("blocks") or []
         if not blocks:
             return [self._text_element_from_block(item, is_discarded, include_text_runs=include_text_runs)]
 
         group_id = item.get("group_id") or f"mineru-list-{item.get('index', 0)}"
-        converted = []
+        converted: list[TextIR] = []
         for block in blocks:
             if not block or not block.get("bbox"):
                 continue
@@ -83,8 +83,8 @@ class MinerUAdapter:
             )
         return converted
 
-    def _image_like_to_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
+    def _image_like_to_elements(self, item: dict[str, Any], is_discarded: bool, include_text_runs: bool = False) -> list[ElementIR]:
+        results: list[ElementIR] = []
         blocks = item.get("blocks") or []
 
         image_bbox = item.get("bbox")
@@ -104,7 +104,10 @@ class MinerUAdapter:
             "style": {},
             "text_elements": [],
         }
-        results.append(normalize_element_ir(image_element))
+        normalized_image = normalize_element_ir(image_element)
+        if not isinstance(normalized_image, ImageIR):
+            raise ValueError("Expected ImageIR from image element normalization")
+        results.append(normalized_image)
 
         for block in blocks:
             if block.get("type") == "image_caption" and block.get("bbox"):
@@ -127,7 +130,7 @@ class MinerUAdapter:
         group_id: str | None = None,
         force_bold: bool | None = None,
         include_text_runs: bool = False,
-    ) -> dict[str, Any]:
+    ) -> TextIR:
         block_type = block.get("type", "text")
         style = {
             "bold": bool(force_bold if force_bold is not None else block_type == "title"),
@@ -151,10 +154,13 @@ class MinerUAdapter:
             "order": [bbox[1], bbox[0]] if bbox else None,
             "style": style,
         }
-        return normalize_element_ir(element)
+        normalized_text = normalize_element_ir(element)
+        if not isinstance(normalized_text, TextIR):
+            raise ValueError("Expected TextIR from text element normalization")
+        return normalized_text
 
-    def _build_text_runs_from_block(self, block: dict[str, Any]) -> list[dict[str, Any]]:
-        runs: list[dict[str, Any]] = []
+    def _build_text_runs_from_block(self, block: dict[str, Any]) -> list[TextRunIR]:
+        runs: list[TextRunIR] = []
         lines = block.get("lines") or []
 
         for line_index, line in enumerate(lines):
@@ -170,12 +176,12 @@ class MinerUAdapter:
                 line_text = block.get("text") or ""
                 if line_text:
                     runs.append(
-                        {
-                            "text": str(line_text),
-                            "bbox": line_bbox,
-                            "line_index": line_index,
-                            "style": {},
-                        }
+                        TextRunIR(
+                            text=str(line_text),
+                            bbox=line_bbox,
+                            line_index=line_index,
+                            style={},
+                        )
                     )
                 continue
 
@@ -187,12 +193,12 @@ class MinerUAdapter:
                     continue
                 span_bbox = normalize_bbox(span.get("bbox") or line_bbox)
                 runs.append(
-                    {
-                        "text": span_text,
-                        "bbox": span_bbox,
-                        "line_index": line_index,
-                        "style": {},
-                    }
+                    TextRunIR(
+                        text=span_text,
+                        bbox=span_bbox,
+                        line_index=line_index,
+                        style={},
+                    )
                 )
 
         if runs:
@@ -202,12 +208,12 @@ class MinerUAdapter:
         block_bbox = block.get("bbox")
         if block_text and block_bbox:
             return [
-                {
-                    "text": block_text,
-                    "bbox": normalize_bbox(block_bbox),
-                    "line_index": 0,
-                    "style": {},
-                }
+                TextRunIR(
+                    text=block_text,
+                    bbox=normalize_bbox(block_bbox),
+                    line_index=0,
+                    style={},
+                )
             ]
 
         return runs
