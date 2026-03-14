@@ -487,5 +487,10 @@ class App(TkinterDnD.Tk):
         messagebox.showinfo(self.i18n['complete_title'], self.i18n['msg_conversion_complete'])
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    if len(sys.argv) > 1:
+        from main import main as cli_main
+
+        cli_main()
+    else:
+        app = App()
+        app.mainloop()

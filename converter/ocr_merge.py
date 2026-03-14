@@ -54,6 +54,7 @@ class PaddleOCREngine:
         self.det_db_box_thresh = det_db_box_thresh
         self.det_db_unclip_ratio = det_db_unclip_ratio
         self._ocr = None
+        self._active_device = None
 
         if self.device_policy not in {"auto", "gpu", "cpu"}:
             raise ValueError("device_policy must be one of: auto, gpu, cpu")
@@ -64,6 +65,20 @@ class PaddleOCREngine:
         if self.device_policy == "cpu":
             return ["cpu"]
         return ["gpu", "cpu"]
+
+    def _resolve_cpu_threads(self) -> int:
+        env_value = os.getenv("MINERU_OCR_CPU_THREADS")
+        if env_value:
+            try:
+                parsed = int(env_value)
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+
+        cpu_count = os.cpu_count() or 4
+        # Keep some headroom for GUI responsiveness on CPU-only runs.
+        return max(1, min(6, max(1, cpu_count // 2)))
 
     def _is_gpu_available(self) -> bool:
         try:
@@ -206,7 +221,14 @@ class PaddleOCREngine:
             },
         ]
 
-        device_variants = [{"device": device}]
+        if device == "cpu":
+            cpu_threads = self._resolve_cpu_threads()
+            device_variants = [
+                {"device": device, "cpu_threads": cpu_threads},
+                {"device": device},
+            ]
+        else:
+            device_variants = [{"device": device}]
 
         for det_params in det_param_variants:
             for device_kwargs in device_variants:
@@ -247,6 +269,11 @@ class PaddleOCREngine:
 
         print(f"[OCR] model_root={model_root} ({model_root_source})")
         print(f"[OCR] device_order={device_order}")
+        if "cpu" in device_order:
+            print(
+                f"[OCR] cpu_threads={self._resolve_cpu_threads()} "
+                "(set MINERU_OCR_CPU_THREADS to override)"
+            )
 
         last_error = None
         gpu_error = None
@@ -255,6 +282,7 @@ class PaddleOCREngine:
             for kwargs in self._constructor_attempts_for_device(device, model_dirs):
                 try:
                     self._ocr = PaddleOCR(**kwargs)
+                    self._active_device = device
                     if device == "cpu" and gpu_failed:
                         print("[OCR] CPU fallback initialization succeeded.")
                     return
@@ -288,6 +316,36 @@ class PaddleOCREngine:
                 return self._ocr.ocr(bgr_image)
             raise
 
+    def _maybe_resize_for_cpu_ocr(self, rgb_image):
+        if self._active_device != "cpu":
+            return rgb_image, 1.0, 1.0
+
+        env_value = os.getenv("MINERU_OCR_CPU_MAX_SIDE", "1920")
+        try:
+            max_side = int(env_value)
+        except ValueError:
+            max_side = 1920
+
+        if max_side <= 0:
+            return rgb_image, 1.0, 1.0
+
+        img_h, img_w = rgb_image.shape[:2]
+        longest_side = max(img_w, img_h)
+        if longest_side <= max_side:
+            return rgb_image, 1.0, 1.0
+
+        scale = float(max_side) / float(longest_side)
+        new_w = max(1, int(round(img_w * scale)))
+        new_h = max(1, int(round(img_h * scale)))
+        resized = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        sx = float(img_w) / float(new_w)
+        sy = float(img_h) / float(new_h)
+        print(
+            f"[OCR] CPU resize before OCR: {img_w}x{img_h} -> {new_w}x{new_h} "
+            f"(max_side={max_side})"
+        )
+        return resized, sx, sy
+
     def extract_text_elements(self, page_image, json_w: float, json_h: float, return_stage_elements: bool = False):
         self._ensure_initialized()
 
@@ -308,18 +366,22 @@ class PaddleOCREngine:
                 }
             return []
 
-        raw_result = self._run_ocr(page_image)
+        ocr_image, sx, sy = self._maybe_resize_for_cpu_ocr(page_image)
+        ocr_h, ocr_w = ocr_image.shape[:2]
+
+        raw_result = self._run_ocr(ocr_image)
 
         raw_elements = []
         for idx, (points, text, score) in enumerate(_iter_ocr_results(raw_result), start=1):
             if not text:
                 continue
 
-            bbox_px = _polygon_to_bbox(points, img_w, img_h)
+            bbox_px = _polygon_to_bbox(points, ocr_w, ocr_h)
             if not bbox_px:
                 continue
 
-            bbox_json = _pixel_bbox_to_json_bbox(bbox_px, json_w, json_h, img_w, img_h)
+            scaled_bbox_px = _scale_pixel_bbox(bbox_px, sx, sy, img_w, img_h)
+            bbox_json = _pixel_bbox_to_json_bbox(scaled_bbox_px, json_w, json_h, img_w, img_h)
             raw_elements.append(
                 {
                     "angle": 0,
@@ -989,6 +1051,17 @@ def _json_bbox_to_pixel_bbox(bbox_json, json_w, json_h, img_w, img_h):
     x2 = bbox_json[2] * (img_w / json_w)
     y2 = bbox_json[3] * (img_h / json_h)
     return _clamp_pixel_bbox([x1, y1, x2, y2], img_w, img_h)
+
+
+def _scale_pixel_bbox(bbox_px, scale_x: float, scale_y: float, img_w: int, img_h: int):
+    x1, y1, x2, y2 = bbox_px
+    scaled = [
+        x1 * scale_x,
+        y1 * scale_y,
+        x2 * scale_x,
+        y2 * scale_y,
+    ]
+    return _clamp_pixel_bbox(scaled, img_w, img_h)
 
 
 def _pixel_bbox_to_json_bbox(bbox_px, json_w, json_h, img_w, img_h):
