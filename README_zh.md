@@ -83,6 +83,22 @@
 python main.py --json "demo/case1/MinerU_xxx.json" --input "demo/case1/PixPin_xxx.png" --output "out.pptx" --ocr-device auto --ocr-model-root "models/paddleocr"
 ```
 
+### 回归：为所有 Demo Case 生成 PPT
+
+如果希望回归流程同时产出 PPT 便于直接人工查看，可执行：
+
+```bash
+python -m pytest "tests/integration/test_case1_ocr.py" -k all_demo_cases_generate_ppt_outputs_for_manual_review
+```
+
+生成的 PPT 位于：
+
+- `tmp/regression_ppt_outputs/case1.pptx`
+- `tmp/regression_ppt_outputs/case2.pptx`
+- `tmp/regression_ppt_outputs/case3.pptx`
+- `tmp/regression_ppt_outputs/case4.pptx`
+- `tmp/regression_ppt_outputs/case5.pptx`
+
 ### 打包为 Windows 独立应用
 
 本项目现推荐使用 **onedir/安装包风格**，而不是 onefile，稳定性更好，也更适合离线模型分发。
@@ -113,3 +129,17 @@ python main.py --json "demo/case1/MinerU_xxx.json" --input "demo/case1/PixPin_xx
 
 4.  **查看构建产物**:
     产物目录位于 `dist/MinerU2PPT/`。
+
+## 文档导航
+
+- 文档域：
+  - `docs/architecture/`
+  - `docs/testing/`
+  - `docs/core-flow/`
+  - `docs/api/`
+- 核心流程文档：
+  - `docs/core-flow/font-size-normalization-pre-render.md`
+  - `docs/core-flow/ocr-bbox-xy-refine-flow.md`
+- 测试文档：
+  - `docs/testing/font-size-normalization-testing.md`
+  - `docs/testing/ocr-bbox-refine-testing.md`

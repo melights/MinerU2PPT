@@ -85,6 +85,22 @@ Example:
 python main.py --json "demo/case1/MinerU_xxx.json" --input "demo/case1/PixPin_xxx.png" --output "out.pptx" --ocr-device auto --ocr-model-root "models/paddleocr"
 ```
 
+### Regression: Generate PPT for All Demo Cases
+
+If you want regression to also produce PPT files for direct visual review, run:
+
+```bash
+python -m pytest "tests/integration/test_case1_ocr.py" -k all_demo_cases_generate_ppt_outputs_for_manual_review
+```
+
+Generated PPT files will be saved to:
+
+- `tmp/regression_ppt_outputs/case1.pptx`
+- `tmp/regression_ppt_outputs/case2.pptx`
+- `tmp/regression_ppt_outputs/case3.pptx`
+- `tmp/regression_ppt_outputs/case4.pptx`
+- `tmp/regression_ppt_outputs/case5.pptx`
+
 ### Packaging as a Standalone Executable (Windows)
 
 This project now recommends **onedir/installer-style packaging** over onefile for better runtime stability and easier model deployment.
@@ -118,7 +134,14 @@ This project now recommends **onedir/installer-style packaging** over onefile fo
 
 ## Documentation
 
+- Documentation domains:
+  - `docs/architecture/`
+  - `docs/testing/`
+  - `docs/core-flow/`
+  - `docs/api/`
 - Core flow docs:
   - `docs/core-flow/font-size-normalization-pre-render.md`
+  - `docs/core-flow/ocr-bbox-xy-refine-flow.md`
 - Testing docs:
   - `docs/testing/font-size-normalization-testing.md`
+  - `docs/testing/ocr-bbox-refine-testing.md`

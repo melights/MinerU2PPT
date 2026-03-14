@@ -60,11 +60,14 @@ venv.bak/
 .idea/
 .vscode/
 
-# Claude Code directory
-.claude/
+# Hidden directories (dot-prefixed)
+.code-agent-tools/
 
 # Temporary files
 *.swp
 *~
 
 tmp/
+
+# Local demo assets (may contain personal data)
+/demo/

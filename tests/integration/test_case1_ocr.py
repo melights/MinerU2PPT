@@ -57,6 +57,47 @@ class TestCase1OCR(unittest.TestCase):
             ]
             self.assertIn("基于AI的声明式数据开发新范式", ocr_texts)
 
+    def test_all_demo_cases_generate_ppt_outputs_for_manual_review(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        demo_root = repo_root / "demo"
+        output_root = repo_root / "tmp" / "regression_ppt_outputs"
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        case_dirs = sorted(path for path in demo_root.glob("case*") if path.is_dir())
+        self.assertGreater(len(case_dirs), 0, f"No demo case directories found in: {demo_root}")
+
+        for case_dir in case_dirs:
+            json_candidates = sorted(case_dir.glob("MinerU*.json")) or sorted(case_dir.glob("*.json"))
+            self.assertGreater(len(json_candidates), 0, f"Missing MinerU json file in: {case_dir}")
+            input_candidates = sorted(case_dir.glob("*.pdf"))
+            if not input_candidates:
+                input_candidates = sorted(
+                    path
+                    for path in case_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}
+                )
+            self.assertGreater(len(input_candidates), 0, f"Missing input file in: {case_dir}")
+
+            input_file = input_candidates[0]
+            json_file = json_candidates[0]
+            output_ppt = output_root / f"{case_dir.name}.pptx"
+
+            logs = io.StringIO()
+            with redirect_stdout(logs), redirect_stderr(logs):
+                convert_mineru_to_ppt(
+                    str(json_file),
+                    str(input_file),
+                    str(output_ppt),
+                    remove_watermark=True,
+                    debug_images=False,
+                )
+
+            self.assertTrue(
+                output_ppt.exists(),
+                f"Output PPT was not generated for {case_dir.name}: {output_ppt}",
+            )
+            self.assertGreater(output_ppt.stat().st_size, 0, f"Generated empty PPT for {case_dir.name}: {output_ppt}")
+
 
 if __name__ == "__main__":
     unittest.main()
