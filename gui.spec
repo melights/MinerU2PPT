@@ -6,10 +6,8 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 project_root = Path(globals().get("__file__", os.path.abspath("gui.spec"))).resolve().parent
-models_src = project_root / "models" / "paddleocr"
+model_variant = os.environ.get("MINERU_OCR_MODEL_VARIANT", "default").lower()
 datas = []
-if models_src.exists():
-    datas.append((str(models_src), "models/paddleocr"))
 
 # PaddleOCR 3.x depends on PaddleX pipeline configs (for pipeline="OCR")
 # and internal OCR resources at runtime. Bundle these data files explicitly
@@ -108,6 +106,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(project_root / "img" / "logo.png"),
 )
 
 coll = COLLECT(

@@ -1,7 +1,9 @@
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import replace
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -19,7 +21,7 @@ from .utils import extract_background_color, extract_font_color, fill_bbox_with_
 
 
 class PageContext:
-    def __init__(self, page_index, page_image, coords, slide):
+    def __init__(self, page_index, page_image, coords, slide, temp_dir: Path | None = None, debug_dir: Path | None = None):
         self.page_index = int(page_index)
         self.slide = slide
         self.original_image = page_image.copy()
@@ -27,6 +29,8 @@ class PageContext:
         self.coords = coords
         self.elements = []
         self.stage_page_irs = {}
+        self.temp_dir = Path(temp_dir) if temp_dir else Path(tempfile.gettempdir())
+        self.debug_dir = Path(debug_dir) if debug_dir else None
 
     def add_element_bbox_for_cleanup(self, bbox, margin_px=0):
         """Register a bounding box to be inpainted on the background image."""
@@ -57,15 +61,19 @@ class PageContext:
 
     def generate_debug_images(self, generator_instance):
         """Generate and save debug images for the page."""
-        page_index = self.page_index
+        if self.debug_dir is None:
+            return
 
-        cv2.imwrite(f"tmp/page_{page_index}_original.png", cv2.cvtColor(self.original_image, cv2.COLOR_RGB2BGR))
+        page_index = self.page_index
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+
+        cv2.imwrite(str(self.debug_dir / f"page_{page_index}_original.png"), cv2.cvtColor(self.original_image, cv2.COLOR_RGB2BGR))
 
         stage_outputs = [
-            ("mineru_original", f"tmp/page_{page_index}_mineru_original_boxes.png"),
-            ("ocr_before_refined_elements", f"tmp/page_{page_index}_ocr_before_refined_elements.png"),
-            ("ocr_after_refined_elements", f"tmp/page_{page_index}_ocr_after_refined_elements.png"),
-            ("merged_final", f"tmp/page_{page_index}_merged_final_boxes.png"),
+            ("mineru_original", self.debug_dir / f"page_{page_index}_mineru_original_boxes.png"),
+            ("ocr_before_refined_elements", self.debug_dir / f"page_{page_index}_ocr_before_refined_elements.png"),
+            ("ocr_after_refined_elements", self.debug_dir / f"page_{page_index}_ocr_after_refined_elements.png"),
+            ("merged_final", self.debug_dir / f"page_{page_index}_merged_final_boxes.png"),
         ]
 
         for stage_name, output_path in stage_outputs:
@@ -74,7 +82,7 @@ class PageContext:
                 self.original_image,
                 stage_bboxes,
                 self.coords,
-                output_path,
+                str(output_path),
             )
 
         text_bboxes = [
@@ -86,17 +94,22 @@ class PageContext:
             self.original_image,
             text_bboxes,
             self.coords,
-            f"tmp/page_{page_index}_text_boxes.png",
+            str(self.debug_dir / f"page_{page_index}_text_boxes.png"),
         )
 
     def render_to_slide(self, generator_instance):
         """Render all processed elements onto the PowerPoint slide."""
         # 1. Render the cleaned background
-        bg_path = f"temp_bg_{id(self.slide)}.png"
-        cv2.imwrite(bg_path, cv2.cvtColor(self.background_image, cv2.COLOR_RGB2BGR))
-        w_pts, h_pts = generator_instance.prs.slide_width, generator_instance.prs.slide_height
-        self.slide.shapes.add_picture(bg_path, Pt(0), Pt(0), w_pts, h_pts)
-        os.remove(bg_path)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        fd, bg_path = tempfile.mkstemp(prefix="temp_bg_", suffix=".png", dir=str(self.temp_dir))
+        os.close(fd)
+        try:
+            cv2.imwrite(bg_path, cv2.cvtColor(self.background_image, cv2.COLOR_RGB2BGR))
+            w_pts, h_pts = generator_instance.prs.slide_width, generator_instance.prs.slide_height
+            self.slide.shapes.add_picture(bg_path, Pt(0), Pt(0), w_pts, h_pts)
+        finally:
+            if os.path.exists(bg_path):
+                os.remove(bg_path)
 
         # 2. Render all image elements first
         for elem in self.elements:
@@ -450,15 +463,25 @@ class PPTGenerator:
         ocr_engine=None,
         ocr_device_policy="auto",
         ocr_model_root=None,
-        ocr_offline_only=True,
+        ocr_model_variant="auto",
+        ocr_offline_only=False,
+        text_cleanup_margin_ratio=None,
+        temp_dir=None,
+        debug_dir=None,
     ):
         self.prs = Presentation()
         self.output_path = output_path
+        self.temp_dir = Path(temp_dir) if temp_dir else Path(tempfile.gettempdir())
+        self.debug_dir = Path(debug_dir) if debug_dir else None
         self.remove_watermark = remove_watermark
         self.ocr_engine = ocr_engine
         self.ocr_device_policy = ocr_device_policy
         self.ocr_model_root = ocr_model_root
+        self.ocr_model_variant = ocr_model_variant
         self.ocr_offline_only = ocr_offline_only
+        if text_cleanup_margin_ratio is None:
+            text_cleanup_margin_ratio = TEXT_CLEANUP_MARGIN_RATIO
+        self.text_cleanup_margin_ratio = float(text_cleanup_margin_ratio)
         self.debug_images = False # Will be set in process_page
         for i in range(len(self.prs.slides) - 1, -1, -1):
             rId = self.prs.slides._sldIdLst[i].rId
@@ -603,7 +626,7 @@ class PPTGenerator:
 
         single_line_height = self._estimate_single_line_height(elem)
         single_line_height_px = max(1.0, single_line_height * scale_y)
-        return max(TEXT_CLEANUP_MIN_MARGIN_PX, int(round(single_line_height_px * TEXT_CLEANUP_MARGIN_RATIO)))
+        return max(TEXT_CLEANUP_MIN_MARGIN_PX, int(round(single_line_height_px * self.text_cleanup_margin_ratio)))
 
     def _process_text(self, context, elem: TextIR):
         bbox = elem.bbox
@@ -679,10 +702,15 @@ class PPTGenerator:
             crop = page_image[px_box[1]:px_box[3], px_box[0]:px_box[2]].copy()
 
         if crop.size > 0:
-            path = f"temp_crop_img_{x1}_{y1}.png"
-            cv2.imwrite(path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-            slide.shapes.add_picture(path, left, top, w, h)
-            os.remove(path)
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            fd, path = tempfile.mkstemp(prefix="temp_crop_img_", suffix=".png", dir=str(self.temp_dir))
+            os.close(fd)
+            try:
+                cv2.imwrite(path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+                slide.shapes.add_picture(path, left, top, w, h)
+            finally:
+                if os.path.exists(path):
+                    os.remove(path)
 
     def _prepare_image_crop(self, context, elem: ImageIR):
         bbox = elem.bbox
@@ -780,7 +808,14 @@ class PPTGenerator:
         self.coords_for_render = coords
 
         if context is None:
-            context = PageContext(page_index, page_image, coords, slide)
+            context = PageContext(
+                page_index,
+                page_image,
+                coords,
+                slide,
+                temp_dir=self.temp_dir,
+                debug_dir=self.debug_dir,
+            )
         else:
             context.slide = slide
             context.coords = coords
@@ -907,19 +942,26 @@ def convert_mineru_to_ppt(
     ocr_engine=None,
     ocr_device_policy="auto",
     ocr_model_root=None,
-    ocr_offline_only=True,
+    ocr_model_variant="auto",
+    ocr_offline_only=False,
     ocr_det_db_thresh=None,
     ocr_det_db_box_thresh=None,
     ocr_det_db_unclip_ratio=None,
     page_range=None,
+    text_cleanup_margin_ratio=None,
+    ocr_font_distance_threshold=None,
 ):
     from .utils import pdf_to_images
     DPI = 300
 
+    output_dir = Path(output_ppt_path).resolve().parent
+    debug_dir = output_dir / "debug"
+    temp_dir = debug_dir if debug_images else Path(tempfile.gettempdir())
+
     if debug_images:
-        if os.path.exists("tmp"):
-            shutil.rmtree("tmp")
-        os.makedirs("tmp")
+        if debug_dir.exists():
+            shutil.rmtree(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -939,12 +981,17 @@ def convert_mineru_to_ppt(
     if ocr_engine is None:
         ocr_engine = PaddleOCREngine(
             device_policy=ocr_device_policy,
+            use_angle_cls=False,
             model_root=ocr_model_root,
             offline_only=ocr_offline_only,
             det_db_thresh=ocr_det_db_thresh,
             det_db_box_thresh=ocr_det_db_box_thresh,
             det_db_unclip_ratio=ocr_det_db_unclip_ratio,
+            refine_font_distance_threshold=ocr_font_distance_threshold,
+            model_variant=ocr_model_variant,
         )
+    elif ocr_font_distance_threshold is not None:
+        ocr_engine.refine_font_distance_threshold = ocr_font_distance_threshold
 
     mineru_adapter = MinerUAdapter()
     ocr_adapter = OCRAdapter(ocr_engine)
@@ -955,7 +1002,11 @@ def convert_mineru_to_ppt(
         ocr_engine=ocr_engine,
         ocr_device_policy=ocr_device_policy,
         ocr_model_root=ocr_model_root,
+        ocr_model_variant=ocr_model_variant,
         ocr_offline_only=ocr_offline_only,
+        text_cleanup_margin_ratio=text_cleanup_margin_ratio,
+        temp_dir=temp_dir,
+        debug_dir=(debug_dir if debug_images else None),
     )
     pages = data if isinstance(data, list) else next(
         (data[k] for k in ["pdf_info", "pages"] if k in data and isinstance(data[k], list)), [data]
@@ -996,7 +1047,14 @@ def convert_mineru_to_ppt(
             'json_w': json_w,
             'json_h': json_h,
         }
-        page_context = PageContext(page_index, page_img, coords, slide)
+        page_context = PageContext(
+            page_index,
+            page_img,
+            coords,
+            slide,
+            temp_dir=temp_dir,
+            debug_dir=(debug_dir if debug_images else None),
+        )
 
         mineru_page = MinerUPageData.from_dict(page_data)
         mineru_elements = validate_ir_elements(mineru_adapter.extract_page_elements(mineru_page, include_text_runs=False))

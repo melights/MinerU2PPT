@@ -262,16 +262,20 @@ class TestGeneratorOCRMerge(unittest.TestCase):
                 "out.pptx",
                 ocr_device_policy="cpu",
                 ocr_model_root="models/paddleocr",
-                ocr_offline_only=True,
+                ocr_model_variant="server",
+                ocr_offline_only=False,
             )
 
         mocked_engine.assert_called_once_with(
             device_policy="cpu",
+            use_angle_cls=False,
             model_root="models/paddleocr",
-            offline_only=True,
+            offline_only=False,
             det_db_thresh=None,
             det_db_box_thresh=None,
             det_db_unclip_ratio=None,
+            refine_font_distance_threshold=None,
+            model_variant="server",
         )
 
     def test_convert_forwards_tuned_ocr_detection_options_to_engine(self):
@@ -313,11 +317,14 @@ class TestGeneratorOCRMerge(unittest.TestCase):
 
         mocked_engine.assert_called_once_with(
             device_policy="auto",
+            use_angle_cls=False,
             model_root=None,
-            offline_only=True,
+            offline_only=False,
             det_db_thresh=0.35,
             det_db_box_thresh=0.8,
             det_db_unclip_ratio=1.1,
+            refine_font_distance_threshold=None,
+            model_variant="auto",
         )
 
     def test_convert_function_forwards_ocr_config_to_generator(self):
@@ -354,7 +361,8 @@ class TestGeneratorOCRMerge(unittest.TestCase):
                 "out.pptx",
                 ocr_device_policy="gpu",
                 ocr_model_root="x/models/paddleocr",
-                ocr_offline_only=True,
+                ocr_model_variant="server",
+                ocr_offline_only=False,
             )
 
         self.assertEqual(mocked_generator_cls.call_count, 1)
@@ -362,7 +370,8 @@ class TestGeneratorOCRMerge(unittest.TestCase):
         self.assertEqual(kwargs["remove_watermark"], True)
         self.assertEqual(kwargs["ocr_device_policy"], "gpu")
         self.assertEqual(kwargs["ocr_model_root"], "x/models/paddleocr")
-        self.assertEqual(kwargs["ocr_offline_only"], True)
+        self.assertEqual(kwargs["ocr_model_variant"], "server")
+        self.assertEqual(kwargs["ocr_offline_only"], False)
         self.assertIsNotNone(kwargs["ocr_engine"])
 
 
@@ -440,11 +449,11 @@ class TestGeneratorOCRMerge(unittest.TestCase):
                 for call in mocked_imwrite.call_args_list
                 if call.args
             ]
-            self.assertTrue(any(path.endswith("tmp/page_0_original.png") for path in written_paths))
-            self.assertTrue(any(path.endswith("tmp/page_0_mineru_original_boxes.png") for path in written_paths))
-            self.assertTrue(any(path.endswith("tmp/page_0_ocr_before_refined_elements.png") for path in written_paths))
-            self.assertTrue(any(path.endswith("tmp/page_0_ocr_after_refined_elements.png") for path in written_paths))
-            self.assertTrue(any(path.endswith("tmp/page_0_merged_final_boxes.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("/debug/page_0_original.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("/debug/page_0_mineru_original_boxes.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("/debug/page_0_ocr_before_refined_elements.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("/debug/page_0_ocr_after_refined_elements.png") for path in written_paths))
+            self.assertTrue(any(path.endswith("/debug/page_0_merged_final_boxes.png") for path in written_paths))
 
     def test_convert_inherits_mineru_bold_when_ocr_replaces_text(self):
         fake_json_data = [
@@ -633,7 +642,54 @@ class TestGeneratorOCRMerge(unittest.TestCase):
                 elements.append(item)
 
         page_image = np.array(Image.open(input_png).convert("RGB"))
-        ocr_engine = PaddleOCREngine()
+
+        class _Engine:
+            def extract_text_elements(self, *_args, return_stage_elements=False, **_kwargs):
+                if return_stage_elements:
+                    return {
+                        "before_refined_elements": [],
+                        "after_refined_elements": [],
+                    }
+                return [
+                    {
+                        "type": "text",
+                        "bbox": [10.0, 10.0, 90.0, 40.0],
+                        "index": 1,
+                        "lines": [
+                            {
+                                "bbox": [10.0, 10.0, 90.0, 40.0],
+                                "spans": [
+                                    {
+                                        "bbox": [10.0, 10.0, 90.0, 40.0],
+                                        "content": "构建流水线",
+                                        "type": "text",
+                                    }
+                                ],
+                            }
+                        ],
+                        "is_discarded": False,
+                    },
+                    {
+                        "type": "text",
+                        "bbox": [12.0, 50.0, 210.0, 80.0],
+                        "index": 2,
+                        "lines": [
+                            {
+                                "bbox": [12.0, 50.0, 210.0, 80.0],
+                                "spans": [
+                                    {
+                                        "bbox": [12.0, 50.0, 210.0, 80.0],
+                                        "content": "形成统一规范的数据开发标准",
+                                        "type": "text",
+                                    }
+                                ],
+                            }
+                        ],
+                        "is_discarded": False,
+                    },
+                ]
+
+        ocr_engine = _Engine()
         ocr_elements = ocr_engine.extract_text_elements(
             page_image,
             page_image.shape[1],

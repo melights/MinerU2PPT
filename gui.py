@@ -344,6 +344,7 @@ class App(TkinterDnD.Tk):
         self.i18n = TRANSLATIONS[get_language()]
         self.title(self.i18n['app_title'])
         self.geometry("700x600")
+        self._set_app_icon()
         self.debug_folder_path = None
         self.input_path, self.json_path, self.output_path = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.page_range = tk.StringVar()
@@ -530,6 +531,16 @@ class App(TkinterDnD.Tk):
             frame.grid()
         else:
             frame.grid_remove()
+
+    def _set_app_icon(self):
+        try:
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(repo_root, "img", "logo.png")
+            if os.path.exists(icon_path):
+                self._app_icon = tk.PhotoImage(file=icon_path)
+                self.iconphoto(False, self._app_icon)
+        except Exception:
+            pass
 
     def _toggle_batch_mode(self):
         is_batch = not self.batch_mode.get()

@@ -20,30 +20,55 @@ TEXT_ELEMENT_TYPES = (
     "page_number",
 )
 
-OCR_BBOX_PAD_RATIO = 0.05
+OCR_BBOX_PAD_RATIO = 0.2
 OCR_BBOX_MIN_PAD_PIXELS = 1
-ROW_FONT_DISTANCE_THRESHOLD = 60.0
-ROW_FONT_MIN_PIXEL_RATIO = 0.005
-COL_FONT_MIN_PIXEL_RATIO = 0.005
+OCR_FONT_DISTANCE_THRESHOLD = 60.0
+OCR_FONT_DISTANCE_THRESHOLD_LITE = 50.0
+OCR_REFINE_MIN_PIXEL_RATIO = 0.005
 ROW_NON_BG_DISTANCE_THRESHOLD = 55.0
 
 
 class PaddleOCREngine:
     _MODEL_ROOT_ENV = "MINERU_OCR_MODEL_ROOT"
-    _MODEL_REQUIRED_DIRS = ("det", "rec", "cls")
+    _MODEL_REQUIRED_DIRS = ("det", "rec")
     _MODEL_FILE_CANDIDATES = ("inference.pdmodel", "inference.json")
     _PARAM_FILE_CANDIDATES = ("inference.pdiparams",)
+    _MODEL_VARIANTS = {"auto", "lite", "server"}
+    _MODEL_NAME_MAPPING = {
+        "lite": {
+            "text_detection_model_name": "PP-OCRv5_mobile_det",
+            "text_recognition_model_name": "PP-OCRv5_mobile_rec",
+        },
+        "server": {
+            "text_detection_model_name": "PP-OCRv5_server_det",
+            "text_recognition_model_name": "PP-OCRv5_server_rec",
+        },
+    }
+    _DB_PARAM_DEFAULTS = {
+        "lite": {
+            "det_db_thresh": 0.35,
+            "det_db_box_thresh": 0.8,
+            "det_db_unclip_ratio": 0.9,
+        },
+        "server": {
+            "det_db_thresh": 0.35,
+            "det_db_box_thresh": 0.8,
+            "det_db_unclip_ratio": 1.0,
+        },
+    }
 
     def __init__(
         self,
         lang: str = "ch",
-        use_angle_cls: bool = True,
+        use_angle_cls: bool = False,
         device_policy: str = "auto",
         model_root: str | None = None,
         offline_only: bool = True,
         det_db_thresh: float | None = None,
         det_db_box_thresh: float | None = None,
         det_db_unclip_ratio: float | None = None,
+        refine_font_distance_threshold: float | None = None,
+        model_variant: str = "auto",
     ):
         self.lang = lang
         self.use_angle_cls = use_angle_cls
@@ -53,11 +78,17 @@ class PaddleOCREngine:
         self.det_db_thresh = det_db_thresh
         self.det_db_box_thresh = det_db_box_thresh
         self.det_db_unclip_ratio = det_db_unclip_ratio
+        self.refine_font_distance_threshold = refine_font_distance_threshold
+        self.model_variant = model_variant.lower() if model_variant else "auto"
         self._ocr = None
         self._active_device = None
+        self._active_model_variant = None
+        self._active_db_defaults = None
 
         if self.device_policy not in {"auto", "gpu", "cpu"}:
             raise ValueError("device_policy must be one of: auto, gpu, cpu")
+        if self.model_variant not in self._MODEL_VARIANTS:
+            raise ValueError("model_variant must be one of: auto, lite, server")
 
     def _resolve_device_order(self):
         if self.device_policy == "gpu":
@@ -105,46 +136,40 @@ class PaddleOCREngine:
             root = Path(env_root).expanduser().resolve()
             return root, f"env:{self._MODEL_ROOT_ENV}"
 
-        meipass_root = getattr(sys, "_MEIPASS", None)
-        if meipass_root:
-            bundled_root = Path(meipass_root).resolve() / "models" / "paddleocr"
-            if bundled_root.exists():
-                return bundled_root, "pyinstaller:_MEIPASS/models/paddleocr"
+        return None, "default:download"
 
-        exe_parent = Path(sys.executable).resolve().parent
-        exe_internal_root = exe_parent / "_internal" / "models" / "paddleocr"
-        if exe_internal_root.exists():
-            return exe_internal_root, "executable:_internal/models/paddleocr"
-
-        exe_root = exe_parent / "models" / "paddleocr"
-        if exe_root.exists():
-            return exe_root, "executable:models/paddleocr"
-
-        source_root = Path(__file__).resolve().parents[1] / "models" / "paddleocr"
-        return source_root, "source:models/paddleocr"
-
-    def _assert_local_models_integrity(self, model_root: Path):
+    def _assert_local_models_integrity(self, model_root: Path, variant: str):
         if not model_root.exists() or not model_root.is_dir():
             raise RuntimeError(
                 f"[OCR] Local model root not found: {model_root}. "
-                "Expected a models/paddleocr directory with per-language det/rec/cls subfolders."
+                "Expected a models/paddleocr directory with per-variant/per-language det/rec/cls subfolders."
             )
 
-        lang_root = model_root / self.lang
+        variant_root = model_root / variant
+        if not variant_root.exists() or not variant_root.is_dir():
+            raise RuntimeError(
+                f"[OCR] Missing model variant directory: {variant_root}. "
+                f"Expected layout: {model_root}/<variant>/<lang>/det|rec|cls"
+            )
+
+        lang_root = variant_root / self.lang
         if not lang_root.exists() or not lang_root.is_dir():
             raise RuntimeError(
                 f"[OCR] Missing language model directory: {lang_root}. "
-                f"Expected layout: {model_root}/<lang>/det|rec|cls"
+                f"Expected layout: {model_root}/<variant>/<lang>/det|rec|cls"
             )
 
-        missing_dirs = [name for name in self._MODEL_REQUIRED_DIRS if not (lang_root / name).is_dir()]
+        required_dirs = list(self._MODEL_REQUIRED_DIRS)
+        if self.use_angle_cls:
+            required_dirs.append("cls")
+        missing_dirs = [name for name in required_dirs if not (lang_root / name).is_dir()]
         if missing_dirs:
             raise RuntimeError(
                 f"[OCR] Missing model subdirectories for lang='{self.lang}': {missing_dirs}. "
                 f"Expected under: {lang_root}"
             )
 
-        for subdir in self._MODEL_REQUIRED_DIRS:
+        for subdir in required_dirs:
             model_dir = lang_root / subdir
             has_model_file = any((model_dir / name).exists() for name in self._MODEL_FILE_CANDIDATES)
             has_param_file = any((model_dir / name).exists() for name in self._PARAM_FILE_CANDIDATES)
@@ -154,44 +179,60 @@ class PaddleOCREngine:
                     f"Required one of {self._MODEL_FILE_CANDIDATES} and one of {self._PARAM_FILE_CANDIDATES}."
                 )
 
-    def _build_model_dirs(self, model_root: Path):
-        lang_root = model_root / self.lang
-        return {
+    def _build_model_dirs(self, model_root: Path, variant: str):
+        lang_root = model_root / variant / self.lang
+        model_dirs = {
             "text_detection_model_dir": str(lang_root / "det"),
             "text_recognition_model_dir": str(lang_root / "rec"),
-            "textline_orientation_model_dir": str(lang_root / "cls"),
         }
+        if self.use_angle_cls:
+            model_dirs["textline_orientation_model_dir"] = str(lang_root / "cls")
+        return model_dirs
 
-    def _constructor_attempts_for_device(self, device: str, model_dirs: dict[str, str]):
+    def _constructor_attempts_for_device(
+        self,
+        device: str,
+        model_dirs: dict[str, str] | None,
+        model_names: dict[str, str] | None,
+        db_defaults: dict[str, float] | None,
+    ):
         base_kwargs = {
             "enable_mkldnn": False,
             "enable_hpi": False,
             "use_tensorrt": False,
             "enable_cinn": False,
             "return_word_box": True,
-            **model_dirs,
         }
+        if model_dirs:
+            base_kwargs.update(model_dirs)
+        if model_names:
+            base_kwargs.update(model_names)
+
+        defaults = db_defaults or {}
+        det_db_thresh = self.det_db_thresh if self.det_db_thresh is not None else defaults.get("det_db_thresh")
+        det_db_box_thresh = (
+            self.det_db_box_thresh if self.det_db_box_thresh is not None else defaults.get("det_db_box_thresh")
+        )
+        det_db_unclip_ratio = (
+            self.det_db_unclip_ratio if self.det_db_unclip_ratio is not None else defaults.get("det_db_unclip_ratio")
+        )
 
         det_param_variants = [{}]
-        if (
-            self.det_db_thresh is not None
-            or self.det_db_box_thresh is not None
-            or self.det_db_unclip_ratio is not None
-        ):
+        if det_db_thresh is not None or det_db_box_thresh is not None or det_db_unclip_ratio is not None:
             legacy_params = {}
             text_det_params = {}
 
-            if self.det_db_thresh is not None:
-                legacy_params["det_db_thresh"] = float(self.det_db_thresh)
-                text_det_params["text_det_thresh"] = float(self.det_db_thresh)
+            if det_db_thresh is not None:
+                legacy_params["det_db_thresh"] = float(det_db_thresh)
+                text_det_params["text_det_thresh"] = float(det_db_thresh)
 
-            if self.det_db_box_thresh is not None:
-                legacy_params["det_db_box_thresh"] = float(self.det_db_box_thresh)
-                text_det_params["text_det_box_thresh"] = float(self.det_db_box_thresh)
+            if det_db_box_thresh is not None:
+                legacy_params["det_db_box_thresh"] = float(det_db_box_thresh)
+                text_det_params["text_det_box_thresh"] = float(det_db_box_thresh)
 
-            if self.det_db_unclip_ratio is not None:
-                legacy_params["det_db_unclip_ratio"] = float(self.det_db_unclip_ratio)
-                text_det_params["text_det_unclip_ratio"] = float(self.det_db_unclip_ratio)
+            if det_db_unclip_ratio is not None:
+                legacy_params["det_db_unclip_ratio"] = float(det_db_unclip_ratio)
+                text_det_params["text_det_unclip_ratio"] = float(det_db_unclip_ratio)
 
             # Try modern text_det_* names first, then legacy det_db_* for older versions.
             det_param_variants = [text_det_params, legacy_params]
@@ -256,8 +297,6 @@ class PaddleOCREngine:
         from paddleocr import PaddleOCR
 
         model_root, model_root_source = self._resolve_model_root()
-        self._assert_local_models_integrity(model_root)
-        model_dirs = self._build_model_dirs(model_root)
 
         requested_order = self._resolve_device_order()
         gpu_available = self._is_gpu_available()
@@ -267,8 +306,33 @@ class PaddleOCREngine:
             print("[OCR] GPU not available; skipping GPU initialization and using CPU.")
         device_order = [d for d in requested_order if d != "gpu" or gpu_available]
 
+        resolved_variant = self.model_variant
+        resolved_source = "explicit"
+        if resolved_variant == "auto":
+            resolved_variant = "server" if gpu_available else "lite"
+            resolved_source = "auto"
+        self._active_model_variant = resolved_variant
+        self._active_db_defaults = dict(self._DB_PARAM_DEFAULTS.get(resolved_variant, {}))
+        print(f"[OCR] det_db_defaults={self._active_db_defaults}")
+
+        model_dirs = None
+        model_names = self._MODEL_NAME_MAPPING.get(resolved_variant)
+        if model_root is not None:
+            model_names = None
+            self._assert_local_models_integrity(model_root, resolved_variant)
+            model_dirs = self._build_model_dirs(model_root, resolved_variant)
+            model_root_hint = f"{model_root}/{resolved_variant}"
+        else:
+            model_root_hint = "default:download"
+
         print(f"[OCR] model_root={model_root} ({model_root_source})")
+        print(f"[OCR] model_variant={resolved_variant} ({resolved_source})")
         print(f"[OCR] device_order={device_order}")
+        if model_root is not None:
+            print(f"[OCR] model_root_layout={model_root_hint}")
+            print(f"[OCR] model_variant_source=local")
+        else:
+            print(f"[OCR] model_variant_source=download")
         if "cpu" in device_order:
             print(
                 f"[OCR] cpu_threads={self._resolve_cpu_threads()} "
@@ -279,7 +343,7 @@ class PaddleOCREngine:
         gpu_error = None
         gpu_failed = False
         for device in device_order:
-            for kwargs in self._constructor_attempts_for_device(device, model_dirs):
+            for kwargs in self._constructor_attempts_for_device(device, model_dirs, model_names, self._active_db_defaults):
                 try:
                     self._ocr = PaddleOCR(**kwargs)
                     self._active_device = device
@@ -407,7 +471,21 @@ class PaddleOCREngine:
             )
 
         merged_line_elements = _merge_ocr_line_fragments(raw_elements)
-        refined_elements = refine_ocr_text_elements(merged_line_elements, page_image, json_w, json_h)
+        font_distance_threshold = self.refine_font_distance_threshold
+        if font_distance_threshold is None:
+            font_distance_threshold = (
+                OCR_FONT_DISTANCE_THRESHOLD_LITE
+                if self._active_model_variant == "lite"
+                else OCR_FONT_DISTANCE_THRESHOLD
+            )
+
+        refined_elements = refine_ocr_text_elements(
+            merged_line_elements,
+            page_image,
+            json_w,
+            json_h,
+            font_distance_threshold=font_distance_threshold,
+        )
 
         for idx, elem in enumerate(refined_elements, start=1):
             elem["index"] = idx
@@ -602,6 +680,7 @@ def refine_ocr_text_elements(
     page_image,
     json_w: float,
     json_h: float,
+    font_distance_threshold: float | None = None,
 ):
     if not ocr_elements:
         return []
@@ -616,7 +695,11 @@ def refine_ocr_text_elements(
             continue
 
         elem_bbox_px = _json_bbox_to_pixel_bbox(elem_bbox, json_w, json_h, img_w, img_h)
-        refined_elem_bbox_px, elem_pad_px = _refine_bbox_vertical(page_image, elem_bbox_px)
+        refined_elem_bbox_px, elem_pad_px = _refine_bbox_vertical(
+            page_image,
+            elem_bbox_px,
+            font_distance_threshold=font_distance_threshold,
+        )
         refined_elem_bbox = _pixel_bbox_to_json_bbox(refined_elem_bbox_px, json_w, json_h, img_w, img_h)
         elem_pad_bbox = _pixel_bbox_to_json_bbox(elem_pad_px, json_w, json_h, img_w, img_h)
 
@@ -627,7 +710,11 @@ def refine_ocr_text_elements(
         for line in original_lines:
             line_bbox = line.get("bbox") or elem_bbox
             line_bbox_px = _json_bbox_to_pixel_bbox(line_bbox, json_w, json_h, img_w, img_h)
-            refined_line_bbox_px, _ = _refine_bbox_vertical(page_image, line_bbox_px)
+            refined_line_bbox_px, _ = _refine_bbox_vertical(
+                page_image,
+                line_bbox_px,
+                font_distance_threshold=font_distance_threshold,
+            )
             refined_line_bbox = _pixel_bbox_to_json_bbox(refined_line_bbox_px, json_w, json_h, img_w, img_h)
 
             new_spans = []
@@ -867,7 +954,7 @@ def _merge_lines_by_geometry(lines: list[dict[str, Any]]):
     return merged
 
 
-def _build_row_font_flags(page_image, x1, x2, y1, y2, font_color):
+def _build_row_font_flags(page_image, x1, x2, y1, y2, font_color, min_pixel_ratio, font_distance_threshold):
     h, w = page_image.shape[:2]
     x1 = max(0, min(int(x1), w))
     x2 = max(0, min(int(x2), w))
@@ -882,13 +969,13 @@ def _build_row_font_flags(page_image, x1, x2, y1, y2, font_color):
         return []
 
     diff = np.linalg.norm(roi.astype(np.float32) - np.array(font_color, dtype=np.float32), axis=2)
-    row_match_counts = np.sum(diff < ROW_FONT_DISTANCE_THRESHOLD, axis=1)
-    min_pixels = max(1, int((x2 - x1) * ROW_FONT_MIN_PIXEL_RATIO))
+    row_match_counts = np.sum(diff < font_distance_threshold, axis=1)
+    min_pixels = max(1, int((x2 - x1) * min_pixel_ratio))
 
     return [count >= min_pixels for count in row_match_counts]
 
 
-def _build_col_font_flags(page_image, x1, x2, y1, y2, font_color):
+def _build_col_font_flags(page_image, x1, x2, y1, y2, font_color, min_pixel_ratio, font_distance_threshold):
     h, w = page_image.shape[:2]
     x1 = max(0, min(int(x1), w))
     x2 = max(0, min(int(x2), w))
@@ -903,13 +990,17 @@ def _build_col_font_flags(page_image, x1, x2, y1, y2, font_color):
         return []
 
     diff = np.linalg.norm(roi.astype(np.float32) - np.array(font_color, dtype=np.float32), axis=2)
-    col_match_counts = np.sum(diff < ROW_FONT_DISTANCE_THRESHOLD, axis=0)
-    min_pixels = max(1, int((y2 - y1) * COL_FONT_MIN_PIXEL_RATIO))
+    col_match_counts = np.sum(diff < font_distance_threshold, axis=0)
+    min_pixels = max(1, int((y2 - y1) * min_pixel_ratio))
 
     return [count >= min_pixels for count in col_match_counts]
 
 
-def _refine_bbox_vertical(page_image, bbox_px):
+def _refine_bbox_vertical(
+    page_image,
+    bbox_px,
+    font_distance_threshold: float | None = None,
+):
     h, w = page_image.shape[:2]
     x1, y1, x2, y2 = _clamp_pixel_bbox(bbox_px, w, h)
     if x2 <= x1 or y2 <= y1:
@@ -921,8 +1012,28 @@ def _refine_bbox_vertical(page_image, bbox_px):
     bg_color = extract_background_color(page_image, [x1, y1, x2, y2])
     font_color, _, _ = extract_font_color(page_image, [x1, y1, x2, y2], bg_color)
 
-    row_flags = _build_row_font_flags(page_image, pad_x1, pad_x2, pad_y1, pad_y2, font_color)
-    col_flags = _build_col_font_flags(page_image, pad_x1, pad_x2, pad_y1, pad_y2, font_color)
+    ratio = OCR_REFINE_MIN_PIXEL_RATIO
+    font_threshold = OCR_FONT_DISTANCE_THRESHOLD if font_distance_threshold is None else float(font_distance_threshold)
+    row_flags = _build_row_font_flags(
+        page_image,
+        pad_x1,
+        pad_x2,
+        pad_y1,
+        pad_y2,
+        font_color,
+        ratio,
+        font_threshold,
+    )
+    col_flags = _build_col_font_flags(
+        page_image,
+        pad_x1,
+        pad_x2,
+        pad_y1,
+        pad_y2,
+        font_color,
+        ratio,
+        font_threshold,
+    )
 
     refined_x1, refined_y1, refined_x2, refined_y2 = x1, y1, x2, y2
 
@@ -1024,7 +1135,7 @@ def _expand_bbox_with_pad(bbox_px, img_w, img_h):
     width = max(1, x2 - x1)
     height = max(1, y2 - y1)
 
-    pad_x = max(OCR_BBOX_MIN_PAD_PIXELS, int(round(width * OCR_BBOX_PAD_RATIO)))
+    pad_x = max(OCR_BBOX_MIN_PAD_PIXELS, int(round(height * OCR_BBOX_PAD_RATIO)))
     pad_y = max(OCR_BBOX_MIN_PAD_PIXELS, int(round(height * OCR_BBOX_PAD_RATIO)))
 
     return [

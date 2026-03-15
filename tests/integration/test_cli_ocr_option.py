@@ -27,10 +27,12 @@ class TestCliOCROption(unittest.TestCase):
         self.assertTrue(kwargs["remove_watermark"])
         self.assertEqual(kwargs["ocr_device_policy"], "auto")
         self.assertIsNone(kwargs["ocr_model_root"])
-        self.assertTrue(kwargs["ocr_offline_only"])
-        self.assertEqual(kwargs["ocr_det_db_thresh"], 0.35)
-        self.assertEqual(kwargs["ocr_det_db_box_thresh"], 0.8)
-        self.assertEqual(kwargs["ocr_det_db_unclip_ratio"], 1.0)
+        self.assertEqual(kwargs["ocr_model_variant"], "auto")
+        self.assertFalse(kwargs["ocr_offline_only"])
+        self.assertIsNone(kwargs["ocr_det_db_thresh"])
+        self.assertIsNone(kwargs["ocr_det_db_box_thresh"])
+        self.assertIsNone(kwargs["ocr_det_db_unclip_ratio"])
+        self.assertIsNone(kwargs["ocr_font_distance_threshold"])
         self.assertIsNone(kwargs["page_range"])
 
     def test_cli_forwards_explicit_ocr_options(self):
@@ -54,11 +56,32 @@ class TestCliOCROption(unittest.TestCase):
         kwargs = mocked_convert.call_args.kwargs
         self.assertEqual(kwargs["ocr_device_policy"], "gpu")
         self.assertEqual(kwargs["ocr_model_root"], "models/paddleocr")
-        self.assertTrue(kwargs["ocr_offline_only"])
-        self.assertEqual(kwargs["ocr_det_db_thresh"], 0.35)
-        self.assertEqual(kwargs["ocr_det_db_box_thresh"], 0.8)
-        self.assertEqual(kwargs["ocr_det_db_unclip_ratio"], 1.0)
+        self.assertEqual(kwargs["ocr_model_variant"], "auto")
+        self.assertFalse(kwargs["ocr_offline_only"])
+        self.assertIsNone(kwargs["ocr_det_db_thresh"])
+        self.assertIsNone(kwargs["ocr_det_db_box_thresh"])
+        self.assertIsNone(kwargs["ocr_det_db_unclip_ratio"])
+        self.assertIsNone(kwargs["ocr_font_distance_threshold"])
         self.assertIsNone(kwargs["page_range"])
+
+    def test_cli_forwards_model_variant(self):
+        argv = [
+            "main.py",
+            "--json",
+            "a.json",
+            "--input",
+            "a.pdf",
+            "--output",
+            "a.pptx",
+            "--ocr-model-variant",
+            "lite",
+        ]
+
+        with mock.patch("sys.argv", argv), mock.patch("main.convert_mineru_to_ppt") as mocked_convert:
+            main.main()
+
+        kwargs = mocked_convert.call_args.kwargs
+        self.assertEqual(kwargs["ocr_model_variant"], "lite")
 
     def test_cli_forwards_tuned_ocr_detection_options(self):
         argv = [
@@ -84,6 +107,28 @@ class TestCliOCROption(unittest.TestCase):
         self.assertEqual(kwargs["ocr_det_db_thresh"], 0.35)
         self.assertEqual(kwargs["ocr_det_db_box_thresh"], 0.8)
         self.assertEqual(kwargs["ocr_det_db_unclip_ratio"], 1.1)
+        self.assertIsNone(kwargs["ocr_font_distance_threshold"])
+        self.assertEqual(kwargs["ocr_model_variant"], "auto")
+
+    def test_cli_forwards_font_distance_threshold(self):
+        argv = [
+            "main.py",
+            "--json",
+            "a.json",
+            "--input",
+            "a.pdf",
+            "--output",
+            "a.pptx",
+            "--ocr-font-distance-threshold",
+            "75",
+        ]
+
+        with mock.patch("sys.argv", argv), mock.patch("main.convert_mineru_to_ppt") as mocked_convert:
+            main.main()
+
+        kwargs = mocked_convert.call_args.kwargs
+        self.assertEqual(kwargs["ocr_font_distance_threshold"], 75.0)
+        self.assertEqual(kwargs["ocr_model_variant"], "auto")
 
     def test_cli_forwards_page_range(self):
         argv = [

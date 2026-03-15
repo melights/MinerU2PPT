@@ -57,6 +57,8 @@ jobs:
 
       - name: Build onedir package with PyInstaller spec
         run: pyinstaller --clean -y gui.spec
+        env:
+          MINERU_OCR_MODEL_VARIANT: ${{ matrix.variant == 'cpu' && 'cpu' || 'default' }}
 
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
